@@ -74,7 +74,7 @@ import logging
 from enum import Enum
 from typing import AnyStr, Callable, Optional
 
-from ops.charm import CharmBase, RelationChangedEvent
+from ops.charm import CharmBase, RelationChangedEvent, RelationDepartedEvent
 from ops.framework import EventBase, Object
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus
 
@@ -84,15 +84,21 @@ logger = logging.getLogger(__name__)
 LIBID = "20b7777f58fe421e9a223aefc2b4d3a4"
 
 # Increment this major API version when introducing breaking changes
-LIBAPI = 0
+LIBAPI = 1
 
 # Increment this PATCH version before using `charmcraft publish-lib` or reset
 # to 0 if you are raising the major API version
-LIBPATCH = 5
+LIBPATCH = 0
 
 
 class LockNoRelationError(Exception):
     """Raised if we are trying to process a lock, but do not appear to have a relation yet."""
+
+    pass
+
+
+class LockRevokedError(Exception):
+    """Raised if the unit received a revoke."""
 
     pass
 
@@ -107,6 +113,7 @@ class LockState(Enum):
     ACQUIRE = "acquire"
     RELEASE = "release"
     GRANTED = "granted"
+    REVOKED = "revoked"
     IDLE = "idle"
 
 
@@ -139,7 +146,10 @@ class Lock:
         <unit n>:
             status: 'acquire|release'
         <application>:
-           <unit n>: 'granted|None'
+           <unit n>: {
+             "state": 'granted',
+             "timestamp": <int, time since Epoch>,
+          }|'revoked|None'
 
     Note that this class makes no attempts to timestamp the locks and thus handle multiple
     requests in a row. If a unit re-requests a lock before being granted the lock, the
@@ -197,6 +207,9 @@ class Lock:
             self.relation.data[self.unit].update({"state": state.value})
 
         if state == LockState.GRANTED:
+            self.relation.data[self.app].update({str(self.unit): {"state": state.value, "timestamp": time.time()}})
+
+        if state is LockState.REVOKED:
             self.relation.data[self.app].update({str(self.unit): state.value})
 
         if state is LockState.IDLE:
@@ -220,11 +233,18 @@ class Lock:
 
     def is_held(self):
         """This unit holds the lock."""
-        return self._state == LockState.GRANTED
+        return self._state.get("state") == LockState.GRANTED
+
+    def revoke(self):
+        self._state = LockState.REVOKED
 
     def release_requested(self):
         """A unit has reported that they are finished with the lock."""
         return self._state == LockState.RELEASE
+
+    def is_revoked(self):
+        """Is this unit set with a revoked lock?"""
+        return self._state == LockState.REVOKED
 
     def is_pending(self):
         """Is this unit waiting for a lock?"""
@@ -281,7 +301,7 @@ class ProcessLocks(EventBase):
 class RollingOpsManager(Object):
     """Emitters and handlers for rolling ops."""
 
-    def __init__(self, charm: CharmBase, relation: AnyStr, callback: Callable):
+    def __init__(self, charm: CharmBase, relation: AnyStr, callback: Callable, *, lock_duration: int = -1):
         """Register our custom events.
 
         params:
@@ -291,6 +311,7 @@ class RollingOpsManager(Object):
                 distinct from other instances that may be hanlding other events.
             callback: a closure to run when we have a lock. (It must take a CharmBase object and
                 EventBase object as args.)
+            duration: the amount of time the leader should wait for a given lock
         """
         # "Inherit" from the charm's class. This gives us access to the framework as
         # self.framework, as well as the self.model shortcut.
@@ -299,16 +320,19 @@ class RollingOpsManager(Object):
         self.name = relation
         self._callback = callback
         self.charm = charm  # Maintain a reference to charm, so we can emit events.
+        self.lock_duration = duration
 
         charm.on.define_event("{}_run_with_lock".format(self.name), RunWithLock)
         charm.on.define_event("{}_acquire_lock".format(self.name), AcquireLock)
         charm.on.define_event("{}_process_locks".format(self.name), ProcessLocks)
 
         # Watch those events (plus the built in relation event).
+        self.framework.observe(charm.on[self.name].leader_elected, self._on_leader_elected)
         self.framework.observe(charm.on[self.name].relation_changed, self._on_relation_changed)
         self.framework.observe(charm.on[self.name].acquire_lock, self._on_acquire_lock)
         self.framework.observe(charm.on[self.name].run_with_lock, self._on_run_with_lock)
         self.framework.observe(charm.on[self.name].process_locks, self._on_process_locks)
+        self.framework.observe(charm.on[self.name].relation_departed, self._on_relation_departed)
 
     def _callback(self: CharmBase, event: EventBase) -> None:
         """Placeholder for the function that actually runs our event.
@@ -316,6 +340,41 @@ class RollingOpsManager(Object):
         Usually overridden in the init.
         """
         raise NotImplementedError
+
+    def _on_leader_elected(self: CharmBase, event: LeaderElectedEvent):
+        """This unit has taken the leadership role.
+
+        It must update each lock granted and its timestamp, as units may have drifting clocks
+        """
+        for lock in Locks(self):
+            # Iterate over each unit, even if we find "is_held() == True"
+            # The goal is to let the option on the table for a multi-lock RollingOps.
+            if lock.is_held():
+                if "timestamp" in lock:
+                    # We renovate the timestamp
+                    # This is preferable than dealing with a leader change with radical clock drift
+                    # At worst case, the given unit will have 2x duration to run the same lock
+                    lock["timestamp"] = time.time()
+
+
+    def _on_relation_departed(self: CharmBase, event: RelationDepartedEvent):
+        """There is a unit going away.
+
+        Ensure the unit did not hold the lock. If it did, then release the lock and retrigger process locks.
+        """
+        if not self.model.unit.is_leader():
+            return
+
+        unit = event.departing_unit
+        for lock in Locks(self):
+            if unit.name == lock.unit.name:
+                # This is the unit in question
+                if lock.is_held():
+                    lock.release()
+                    # There is a change, we should review the locks' status
+                    self.charm.on[self.name].process_locks.emit()
+                # Found the unit and processed its lock
+                return
 
     def _on_relation_changed(self: CharmBase, event: RelationChangedEvent):
         """Process relation changed.
@@ -334,8 +393,19 @@ class RollingOpsManager(Object):
         if lock.is_held():
             self.charm.on[self.name].run_with_lock.emit()
 
+        if lock.is_revoked():
+            raise LockRevokedError()
+
         if self.model.unit.is_leader():
             self.charm.on[self.name].process_locks.emit()
+
+    def _timed_out(lock: Lock):
+        if self.lock_duration <= 0 or not self.is_held():
+            # Duration not provided
+            return False
+        if self.lock_duration + lock.get("timestamp") <= time.time():
+            return True
+        return False
 
     def _on_process_locks(self: CharmBase, event: ProcessLocks):
         """Process locks.
@@ -349,7 +419,13 @@ class RollingOpsManager(Object):
         pending = []
 
         for lock in Locks(self):
-            if lock.is_held():
+            if lock.is_held() and lock.unit != self.model.unit:
+                # leader never has its own lock revoked, unless it loses the leadership
+                # In this case, the leader-elected is issued in another unit
+                # then, the new leader will update the old leader's timestamp accordingly
+                # and control its lock duration.
+                if self._timed_out(lock):
+                    lock.revoke()
                 # One of our units has the lock -- return without further processing.
                 return
 
@@ -369,6 +445,7 @@ class RollingOpsManager(Object):
             self.model.app.status = MaintenanceStatus("Beginning rolling {}".format(self.name))
             lock = pending[-1]
             lock.grant()
+            self.timer = self.lock_duration
             if lock.unit == self.model.unit:
                 # It's time for the leader to run with lock.
                 self.charm.on[self.name].run_with_lock.emit()
@@ -377,7 +454,7 @@ class RollingOpsManager(Object):
         if self.model.app.status.message == f"Beginning rolling {self.name}":
             self.model.app.status = ActiveStatus()
 
-    def _on_acquire_lock(self: CharmBase, event: AcquireLock):
+    def _on_acquire_lock(self: CharmBase, event: ActionEvent):
         """Request a lock."""
         try:
             Lock(self).acquire()  # Updates relation data
@@ -387,11 +464,12 @@ class RollingOpsManager(Object):
             # persist callback override for eventual run
             relation.data[self.charm.unit].update({"callback_override": event.callback_override})
             self.charm.on[self.name].relation_changed.emit(relation)
-        except LockNoRelationError:
-            logger.debug("No {} peer relation yet. Delaying rolling op.".format(self.name))
-            event.defer()
+        except LockNoRelationError as e:
+            logger.debug("No {} peer relation yet. Running trivial case where unit is alone".format(self.name))
+            # Re-raise the error, so other units may listen to LockNoRelationError and immediately execute their actions
+            raise e
 
-    def _on_run_with_lock(self: CharmBase, event: RunWithLock):
+    def _on_run_with_lock(self: CharmBase, event: AcquireLock):
         lock = Lock(self)
         self.model.unit.status = MaintenanceStatus("Executing {} operation".format(self.name))
         relation = self.model.get_relation(self.name)
@@ -401,6 +479,10 @@ class RollingOpsManager(Object):
                 "callback_override", self._callback.__name__
             )
         )
+
+        if lock.is_revoked():
+            raise LockRevokedError()
+
         callback = getattr(self.charm, callback_name)
         callback(event)
 
