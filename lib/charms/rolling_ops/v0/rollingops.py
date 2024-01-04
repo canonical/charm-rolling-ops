@@ -49,7 +49,7 @@ class SomeCharm(...):
 
 To kick off the rolling restart, emit this library's AcquireLock event. The simplest way
 to do so would be with an action, though it might make sense to acquire the lock in
-response to another event. 
+response to another event.
 
 ```python
     def _on_trigger_restart(self, event):
@@ -71,10 +71,18 @@ omit the successful units from a subsequent run-action call.)
 
 """
 import logging
+import os
+import subprocess
+import time
 from enum import Enum
 from typing import AnyStr, Callable, Optional
 
-from ops.charm import CharmBase, RelationChangedEvent
+from ops.charm import (
+    CharmBase,
+    LeaderElectedEvent,
+    RelationChangedEvent,
+    RelationDepartedEvent,
+)
 from ops.framework import EventBase, Object
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus
 
@@ -97,7 +105,29 @@ class LockNoRelationError(Exception):
     pass
 
 
-class LockState(Enum):
+class LockRevokedError(Exception):
+    """Raised if the unit received a revoke."""
+
+    pass
+
+
+class LockWithRevokeMissingTimeoutError(Exception):
+    """Raised if the unit is missing a timestamp."""
+
+    pass
+
+
+class LockStateAbs(Enum):
+    """Abstract class for LockState.
+
+    Enums can only be extended if its parent does not define any values.
+    https://docs.python.org/3/howto/enum.html#restricted-enum-subclassing
+    """
+
+    pass
+
+
+class LockState(LockStateAbs):
     """Possible states for our Distributed lock.
 
     Note that there are two states set on the unit, and two on the application.
@@ -107,6 +137,20 @@ class LockState(Enum):
     ACQUIRE = "acquire"
     RELEASE = "release"
     GRANTED = "granted"
+    IDLE = "idle"
+
+
+class LockStateWithRevoke(LockStateAbs):
+    """Possible states for our Distributed lock.
+
+    Note that there are two states set on the unit, and three on the application.
+
+    """
+
+    ACQUIRE = "acquire"
+    RELEASE = "release"
+    GRANTED = "granted"
+    REVOKED = "revoked"
     IDLE = "idle"
 
 
@@ -149,7 +193,6 @@ class Lock:
     """
 
     def __init__(self, manager, unit=None):
-
         self.relation = manager.model.relations[manager.name][0]
         if not self.relation:
             # TODO: defer caller in this case (probably just fired too soon).
@@ -185,11 +228,12 @@ class Lock:
         return app_state  # Granted or unset/released
 
     @_state.setter
-    def _state(self, state: LockState):
+    def _state(self, s: LockStateAbs):
         """Set the given state.
 
         Since we update the relation data, this may fire off a RelationChanged event.
         """
+        state = LockState(s)
         if state == LockState.ACQUIRE:
             self.relation.data[self.unit].update({"state": state.value})
 
@@ -231,6 +275,60 @@ class Lock:
         return self._state == LockState.ACQUIRE
 
 
+class LockWithRevoke(Lock):
+    """A class that tracks a lock with an extra revoke option.
+
+    Revoke allows the leader unit to cancel a lock acquired by another unit and reassign it.
+
+    Whenever a lock is assigned, it comes with an extra timestamp information in its state.
+    That timestamp can be used to revoke the lock later on.
+
+    This class differs from Lock() in the application level, where it adds a REVOKED state
+    and a timestamp to the GRANTED state.
+
+    In more detail, here is the relation structure:
+
+    relation.data:
+        <unit n>:
+            status: 'acquire|release'
+        <application>:
+           <unit n>: {
+             "state": 'granted',
+             "timestamp": <int, time since Epoch>,
+          }|'revoked|None'
+    """
+
+    def __init__(self, manager, unit=None):
+        super().__init__(manager, unit)
+
+    def _state(self, s: LockStateAbs):
+        super()._state(s)
+        # There are extra options: we may be dealing with a revoked lock
+        # OR granting needs a timestmap as well
+        state = LockStateWithRevoke(s)
+        if state == LockStateWithRevoke.GRANTED:
+            self.relation.data[self.app].update(
+                {str(self.unit): {"state": state.value, "timestamp": time.time()}}
+            )
+
+        if state is LockStateWithRevoke.REVOKED:
+            self.relation.data[self.app].update({str(self.unit): state.value})
+
+    def revoke(self):
+        """Revoke a lock from a unit."""
+        self._state = LockStateWithRevoke.REVOKED
+
+    def is_revoked(self):
+        """Is this unit set with a revoked lock?"""
+        return self._state == LockStateWithRevoke.REVOKED
+
+    def set_timestamp(self, timestamp):
+        """Set the timestamp for a lock."""
+        self.relation.data[self.app].update(
+            {str(self.unit): {"state": LockStateWithRevoke.GRANTED.value, "timestamp": timestamp}}
+        )
+
+
 class Locks:
     """Generator that returns a list of locks."""
 
@@ -266,14 +364,22 @@ class AcquireLock(EventBase):
         self.callback_override = callback_override or ""
 
     def snapshot(self):
+        """Snapshot the Event."""
         return {"callback_override": self.callback_override}
 
     def restore(self, snapshot):
+        """Restore the Event."""
         self.callback_override = snapshot["callback_override"]
 
 
 class ProcessLocks(EventBase):
     """Used to tell the leader to process all locks."""
+
+    pass
+
+
+class LockExpired(EventBase):
+    """Wakes up the leader unit to process an expired lock."""
 
     pass
 
@@ -397,9 +503,8 @@ class RollingOpsManager(Object):
         relation = self.model.get_relation(self.name)
 
         # default to instance callback if not set
-        callback_name = event.get("callback_override", relation.data[self.charm.unit].get(
-                "callback_override", self._callback.__name__
-            )
+        callback_name = relation.data[self.charm.unit].get(
+            "callback_override", self._callback.__name__
         )
         callback = getattr(self.charm, callback_name)
         callback(event)
@@ -413,3 +518,209 @@ class RollingOpsManager(Object):
 
         if self.model.unit.status.message == f"Executing {self.name} operation":
             self.model.unit.status = ActiveStatus()
+
+
+class WakeUpHandler:
+    """Manages the wake up script for the leader unit."""
+
+    WAKE_UP_SCRIPT = """#!/usr/bin/python3
+
+    import time
+    import subprocess
+    sleep(int(sys.argv[1]))
+    subprocess.run("exec ./src/charm.py", shell=True env={"PYTHONPATH": "lib:venv", "JUJU_DISPATCH_PATH": "lock-expired"})
+    """
+
+    def __init__(self, wake_up_path: AnyStr = "."):
+        """Register our custom events.
+
+        params:
+            wake_up_path: the path where the wake up script will be created.
+        """
+        self.wake_up_script_path = os.path.join(wake_up_path, "wake_leader.py")
+        self.wake_up_pid_path = os.path.join(wake_up_path, "wake_leader.pid")
+        if not os.path.exists(self.wake_up_script_path):
+            os.makedirs(wake_up_path)
+            with open(self.wake_up_script_path, "w") as f:
+                f.write(self.WAKE_UP_SCRIPT)
+            os.chmod(self.wake_up_script_path, 0o700)
+
+    @property
+    def is_waiting(self) -> bool:
+        """Check if the wake up script is running as a process or not."""
+        return os.path.exists(self.wake_up_pid_path) and os.kill(self.pid, 0)
+
+    @property
+    def _pid(self):
+        with open(self.wake_up_pid_path, "r") as f:
+            return int(f.read())
+
+    def set_wake_process(self, lock_duration: int, *, override: bool = False):
+        """Set the wake up script.
+
+        If there is a process already awaiting, then override it if override=True.
+        """
+        if self.is_waiting and not override:
+            return
+        newpid = subprocess.Popen(["/bin/bash", "-c", self.WAKE_UP_SCRIPT, str(lock_duration)]).pid
+        with open(self.wake_up_pid_path, "w") as f:
+            f.write(str(newpid))
+
+
+class RollingOpsManagerWithExpire(RollingOpsManager):
+    """Emitters and handlers for rolling ops with lock expiration options."""
+
+    def __init__(
+        self,
+        charm: CharmBase,
+        relation: AnyStr,
+        callback: Callable,
+        *,
+        duration: int = -1,
+        wake_leader: bool = True,
+    ):
+        """Register our custom events.
+
+        params:
+            charm: the charm we are attaching this to.
+            relation: an identifier, by convention based on the name of the relation in the
+                metadata.yaml, which identifies this instance of RollingOperatorsFactory,
+                distinct from other instances that may be hanlding other events.
+            callback: a closure to run when we have a lock. (It must take a CharmBase object
+                and EventBase object as args.)
+            duration: the amount of time the leader should wait for a given lock, in seconds.
+            wake_leader: whether to wake up the leader unit to process an expired lock outside
+                of an standard hook.
+        """
+        super().__init__(charm, relation, callback)
+        charm.on.define_event("{}_lock_expired".format(self.name), LockExpired)
+
+        self.lock_duration = duration
+        # This parameter will only matter if this unit is the leader.
+        self.waker = None
+        if self.wake_leader:
+            self.waker = WakeUpHandler()
+        self.framework.observe(charm.on[self.name].leader_elected, self._on_leader_elected)
+        self.framework.observe(charm.on[self.name].relation_departed, self._on_relation_departed)
+
+    def _on_leader_elected(self: CharmBase, event: LeaderElectedEvent):
+        """This unit has taken the leadership role.
+
+        It must update each lock granted and its timestamp, as units may have drifting clocks
+        """
+        for lock in Locks(self):
+            # Iterate over each unit, even if we find "is_held() == True"
+            # The goal is to let the option on the table for a multi-lock RollingOps.
+            if lock.is_held():
+                if "timestamp" in lock:
+                    # We renovate the timestamp
+                    # This is preferable than dealing with a leader change with radical clock drift
+                    # At worst case, the given unit will have 2x duration to run the same lock
+                    lock["timestamp"] = time.time()
+
+    def _on_relation_departed(self: CharmBase, event: RelationDepartedEvent):
+        """There is a unit going away.
+
+        Ensure the unit did not hold the lock. If it did, then release the lock and
+        retrigger process locks.
+        """
+        if not self.model.unit.is_leader():
+            return
+
+        unit = event.departing_unit
+        for lock in Locks(self):
+            if unit.name == lock.unit.name:
+                # This is the unit in question
+                if lock.is_held():
+                    lock.release()
+                    # There is a change, we should review the locks' status
+                    self.charm.on[self.name].process_locks.emit()
+                # Found the unit and processed its lock
+                return
+
+    def _on_relation_changed(self: CharmBase, event: RelationChangedEvent):
+        lock = LockWithRevoke(self)
+        if lock.is_revoked():
+            raise LockRevokedError()
+        super()._on_relation_changed(event)
+
+    def _timed_out(self, lock: Lock):
+        if self.lock_duration <= 0 or not self.is_held():
+            # Duration not provided or this unit is the leader.
+            # If the leader is gone whilst holding the lock, then a new election takes place
+            # and the new leader will be able to run the lock process.
+            return False
+        # There is no timestamp.
+        # One possible scenario is an upgrade from Lock to LockWithRevoke. In this case,
+        # we should raise an error and the leader unit will register a new timestamp for
+        # that lock.
+        if not lock.get("timestamp"):
+            raise LockWithRevokeMissingTimeoutError()
+        if self.lock_duration + lock.get("timestamp") <= time.time():
+            return True
+        return False
+
+    def _on_process_locks(self: CharmBase, event: ProcessLocks):  # noqa: C901
+        """Process locks.
+
+        Runs only on the leader. Updates the status of all locks.
+        """
+        if not self.model.unit.is_leader():
+            return
+
+        pending = []
+
+        for lock in Locks(self):
+            if lock.is_held() and lock.unit != self.model.unit:
+                # leader never has its own lock revoked, unless it loses the leadership
+                # In this case, the leader-elected is issued in another unit
+                # then, the new leader will update the old leader's timestamp accordingly
+                # and control its lock duration.
+                try:
+                    if self._timed_out(lock):
+                        lock.revoke()
+                except LockWithRevokeMissingTimeoutError:
+                    # This unit is holding the lock but has no timestamp set.
+                    # Set it now and leave
+                    lock.set_timestamp(time.time())
+                # One of our units has the lock -- return without further processing.
+                return
+
+            if lock.release_requested():
+                lock.clear()  # Updates relation data
+
+            if lock.is_pending():
+                if lock.unit == self.model.unit:
+                    # Always run on the leader last.
+                    pending.insert(0, lock)
+                else:
+                    pending.append(lock)
+
+        # If we reach this point, and we have pending units, we want to grant a lock to
+        # one of them.
+        if pending:
+            self.model.app.status = MaintenanceStatus("Beginning rolling {}".format(self.name))
+            lock = pending[-1]
+            lock.grant()
+            if lock.unit == self.model.unit:
+                # It's time for the leader to run with lock.
+                self.charm.on[self.name].run_with_lock.emit()
+                return
+            # Lock has been granted to another, non-leader unit
+            if self.waker:
+                self.waker.set_wake_process(self.lock_duration, override=True)
+            return
+
+        if self.model.app.status.message == f"Beginning rolling {self.name}":
+            self.model.app.status = ActiveStatus()
+
+    def _on_run_with_lock(self: CharmBase, event: RunWithLock):
+        """Executes the lock considering a revoked lock scenario.
+
+        Check if the lock has been revoked. If yes, then raise an error. Otherwise, continue.
+        """
+        lock = LockWithRevoke(self)
+        if lock.is_revoked():
+            raise LockRevokedError()
+        # Lock available, proceed as usual
+        super()._on_run_with_lock(event)
