@@ -548,7 +548,7 @@ class WakeUpHandler:
     @property
     def is_waiting(self) -> bool:
         """Check if the wake up script is running as a process or not."""
-        return os.path.exists(self.wake_up_pid_path) and os.kill(self.pid, 0)
+        return os.path.exists(self.wake_up_pid_path) and os.kill(self._pid, 0)
 
     @property
     def _pid(self):
