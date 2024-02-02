@@ -15,7 +15,7 @@
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 
 import unittest
-from unittest.mock import Mock
+from types import SimpleNamespace
 
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus
 from ops.testing import Harness
@@ -37,7 +37,7 @@ class TestCharm(unittest.TestCase):
 
     def test_acquire(self):
         # A human operator runs the "restart" action.
-        action_event = Mock()
+        action_event = SimpleNamespace(callback_override="testfunc")
         self.harness.charm.restart_manager._on_acquire_lock(action_event)
 
         data = self.harness.charm.model.relations["restart"][0].data
