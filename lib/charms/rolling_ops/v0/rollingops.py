@@ -49,7 +49,7 @@ class SomeCharm(...):
 
 To kick off the rolling restart, emit this library's AcquireLock event. The simplest way
 to do so would be with an action, though it might make sense to acquire the lock in
-response to another event. 
+response to another event.
 
 ```python
     def _on_trigger_restart(self, event):
@@ -88,7 +88,7 @@ LIBAPI = 0
 
 # Increment this PATCH version before using `charmcraft publish-lib` or reset
 # to 0 if you are raising the major API version
-LIBPATCH = 5
+LIBPATCH = 6
 
 
 class LockNoRelationError(Exception):
@@ -266,9 +266,11 @@ class AcquireLock(EventBase):
         self.callback_override = callback_override or ""
 
     def snapshot(self):
+        """Snapshots the event content."""
         return {"callback_override": self.callback_override}
 
     def restore(self, snapshot):
+        """Restores the callback override."""
         self.callback_override = snapshot["callback_override"]
 
 
@@ -305,7 +307,16 @@ class RollingOpsManager(Object):
         charm.on.define_event("{}_process_locks".format(self.name), ProcessLocks)
 
         # Watch those events (plus the built in relation event).
-        self.framework.observe(charm.on[self.name].relation_changed, self._on_relation_changed)
+        for relation in [
+            charm.on[self.name].relation_joined,
+            charm.on[self.name].relation_changed,
+            charm.on[self.name].relation_departed,
+            charm.on[self.name].relation_broken,
+        ]:
+            self.framework.observe(relation, self._on_relation_changed)
+        self.framework.observe(charm.on.leader_elected, self._on_non_relation_event)
+        self.framework.observe(charm.on.update_status, self._on_non_relation_event)
+
         self.framework.observe(charm.on[self.name].acquire_lock, self._on_acquire_lock)
         self.framework.observe(charm.on[self.name].run_with_lock, self._on_run_with_lock)
         self.framework.observe(charm.on[self.name].process_locks, self._on_process_locks)
@@ -335,6 +346,12 @@ class RollingOpsManager(Object):
             self.charm.on[self.name].run_with_lock.emit()
 
         if self.model.unit.is_leader():
+            self.charm.on[self.name].process_locks.emit()
+
+    def _on_non_relation_event(self: CharmBase, _):
+        """Reacts to a non-relation event: check if any acquire requests are not responded."""
+        if self.model.get_relation(self.name):
+            # The actual target-relation exists, so we can process events
             self.charm.on[self.name].process_locks.emit()
 
     def _on_process_locks(self: CharmBase, event: ProcessLocks):
