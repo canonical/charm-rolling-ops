@@ -39,7 +39,6 @@ jobs:
       matrix:
         paths:
         - to-charm-directory: "."
-        - to-charm-directory: "./tests/integration/relations/opensearch_provider/application-charm/"
     uses: canonical/data-platform-workflows/.github/workflows/build_charm.yaml@main
     with:
       path-to-charm-directory: ${{ matrix.paths.to-charm-directory }}
