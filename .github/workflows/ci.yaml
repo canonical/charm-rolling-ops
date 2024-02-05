@@ -1,0 +1,77 @@
+# Copyright 2022 Canonical Ltd.
+# See LICENSE file for licensing details.
+name: Tests
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+  schedule:
+    - cron: '53 0 * * *' # Daily at 00:53 UTC
+  # Triggered on push to branch "main" by .github/workflows/release.yaml
+  workflow_call:
+
+jobs:
+  lint:
+    name: Lint
+    uses: canonical/data-platform-workflows/.github/workflows/lint.yaml@main
+
+  unit-test:
+    name: Unit test charm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install tox & poetry
+        run: |
+          pipx install tox
+          pipx install poetry
+      - name: Run tests
+        run: tox run -e unit
+
+  build:
+    name: Build charm
+    strategy:
+      fail-fast: false
+      matrix:
+        paths:
+        - to-charm-directory: "."
+        - to-charm-directory: "./tests/integration/relations/opensearch_provider/application-charm/"
+    uses: canonical/data-platform-workflows/.github/workflows/build_charm.yaml@main
+    with:
+      path-to-charm-directory: ${{ matrix.paths.to-charm-directory }}
+      charmcraft-snap-channel: beta
+      cache: true
+
+  integration-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        juju:
+          - libjuju: ^3.2
+            juju-snap: 3.3/stable
+          - agent: 3.2.4
+            libjuju: ^3
+            juju-snap: 3.2/stable
+          - agent: 3.1.7
+            libjuju: ^3
+            juju-snap: 3.1/stable
+          - agent: 3.1.6
+            libjuju: ^3
+            juju-snap: 3.1/stable
+          - libjuju: ^2,<3
+            juju-snap: 2.9/stable
+    name: Integration test charm | ${{ matrix.juju.agent }}
+    needs:
+      - lint
+      - unit-test
+      - build
+    uses: canonical/data-platform-workflows/.github/workflows/integration_test_charm.yaml@main
+    with:
+      artifact-prefix: ${{ needs.build.outputs.artifact-prefix }}
+      cloud: lxd
+      juju-agent-version: ${{ matrix.juju.agent }}
+      libjuju-version-constraint: ${{ matrix.juju.libjuju }}

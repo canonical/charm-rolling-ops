@@ -46,7 +46,6 @@ class TestCharm(unittest.TestCase):
         self.assertEqual(data[self.harness.model.unit]["state"], "acquire")
 
     def test_peers(self):
-
         # Set unit 0 as the leader.
         # Add a peer relation to a unit 1.
         self.harness.set_leader(True)

@@ -63,7 +63,7 @@ the CLI:
 juju run-action some-charm/0 some-charm/1 <... some-charm/n> restart
 ```
 
-Note that all units that plan to restart must receive the action and emit the aquire
+Note that all units that plan to restart must receive the action and emit the acquire
 event. Any units that do not run their acquire handler will be left out of the rolling
 restart. (An operator might take advantage of this fact to recover from a failed rolling
 operation without restarting workloads that were able to successfully restart -- simply
@@ -88,7 +88,7 @@ LIBAPI = 0
 
 # Increment this PATCH version before using `charmcraft publish-lib` or reset
 # to 0 if you are raising the major API version
-LIBPATCH = 5
+LIBPATCH = 7
 
 
 class LockNoRelationError(Exception):
@@ -149,7 +149,6 @@ class Lock:
     """
 
     def __init__(self, manager, unit=None):
-
         self.relation = manager.model.relations[manager.name][0]
         if not self.relation:
             # TODO: defer caller in this case (probably just fired too soon).
@@ -182,6 +181,7 @@ class Lock:
             # Active acquire request.
             return LockState.ACQUIRE
 
+        logger.debug(f"Lock state: {unit_state} {app_state}")
         return app_state  # Granted or unset/released
 
     @_state.setter
@@ -202,21 +202,27 @@ class Lock:
         if state is LockState.IDLE:
             self.relation.data[self.app].update({str(self.unit): state.value})
 
+        logger.debug(f"_state: {state.value}")
+
     def acquire(self):
         """Request that a lock be acquired."""
         self._state = LockState.ACQUIRE
+        logger.debug("Lock acquired")
 
     def release(self):
         """Request that a lock be released."""
         self._state = LockState.RELEASE
+        logger.debug("Lock released")
 
     def clear(self):
         """Unset a lock."""
         self._state = LockState.IDLE
+        logger.debug("Lock cleared")
 
     def grant(self):
         """Grant a lock to a unit."""
         self._state = LockState.GRANTED
+        logger.debug("Lock granted")
 
     def is_held(self):
         """This unit holds the lock."""
@@ -288,7 +294,7 @@ class RollingOpsManager(Object):
             charm: the charm we are attaching this to.
             relation: an identifier, by convention based on the name of the relation in the
                 metadata.yaml, which identifies this instance of RollingOperatorsFactory,
-                distinct from other instances that may be hanlding other events.
+                distinct from other instances that may be handling other events.
             callback: a closure to run when we have a lock. (It must take a CharmBase object and
                 EventBase object as args.)
         """
@@ -381,7 +387,7 @@ class RollingOpsManager(Object):
         """Request a lock."""
         try:
             Lock(self).acquire()  # Updates relation data
-            # emit relation changed event in the edge case where aquire does not
+            # emit relation changed event in the edge case where acquire does not
             relation = self.model.get_relation(self.name)
 
             # persist callback override for eventual run
@@ -394,6 +400,8 @@ class RollingOpsManager(Object):
 
     def _on_run_with_lock(self: CharmBase, event: RunWithLock):
         lock = Lock(self)
+        logger.debug(f"Running {self.name} operation: lock status is {lock.__dict__}")
+
         self.model.unit.status = MaintenanceStatus("Executing {} operation".format(self.name))
         relation = self.model.get_relation(self.name)
 
@@ -401,8 +409,10 @@ class RollingOpsManager(Object):
         callback_name = relation.data[self.charm.unit].get(
             "callback_override", self._callback.__name__
         )
+        logger.debug(f"Running {self.name} operation: callback is {callback_name}")
         callback = getattr(self.charm, callback_name)
         callback(event)
+        logger.debug(f"Running {self.name} operation: {callback_name} - successful")
 
         lock.release()  # Updates relation data
         if lock.unit == self.model.unit:
