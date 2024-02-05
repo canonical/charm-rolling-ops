@@ -307,8 +307,15 @@ class RollingOpsManager(Object):
         charm.on.define_event("{}_process_locks".format(self.name), ProcessLocks)
 
         # Watch those events (plus the built in relation event).
-        self.framework.observe(charm.on[self.name].relation_changed, self._on_relation_changed)
-        self.framework.observe(charm.on.leader_elected, self._on_leader_elected)
+        for relation in [
+            charm.on[self.name].relation_joined,
+            charm.on[self.name].relation_changed,
+            charm.on[self.name].relation_departed,
+            charm.on[self.name].relation_broken,
+        ]:
+            self.framework.observe(relation, self._on_relation_changed)
+        self.framework.observe(charm.on.leader_elected, self._on_non_relation_event)
+        self.framework.observe(charm.on.update_status, self._on_non_relation_event)
 
         self.framework.observe(charm.on[self.name].acquire_lock, self._on_acquire_lock)
         self.framework.observe(charm.on[self.name].run_with_lock, self._on_run_with_lock)
@@ -341,9 +348,10 @@ class RollingOpsManager(Object):
         if self.model.unit.is_leader():
             self.charm.on[self.name].process_locks.emit()
 
-    def _on_leader_elected(self: CharmBase, _):
-        """Reacts to a leadership changed: check if any acquire requests are not responded."""
+    def _on_non_relation_event(self: CharmBase, _):
+        """Reacts to a non-relation event: check if any acquire requests are not responded."""
         if self.model.get_relation(self.name):
+            # The actual target-relation exists, so we can process events
             self.charm.on[self.name].process_locks.emit()
 
     def _on_process_locks(self: CharmBase, event: ProcessLocks):
