@@ -12,6 +12,11 @@ authors = []
 python = "^3.10"
 ops = "^2.5.0"
 
+[tool.poetry.group.charm-libs.dependencies]
+ops = ">=2.5.0"
+poetry-core = "*"
+pydantic = "^1.10, <2"
+
 [tool.poetry.group.format]
 optional = true
 
