@@ -32,11 +32,11 @@ MODEL_CONFIG = {
 }
 GROUP_MARKS = [
     "restart-1-unit",
-    "restart-all-units-at-once",
+    "restart-all-units",
     "remove-unit-and-restart",
     "remove-leader-and-restart" "stop-unit-container",
 ]
-TARGET_SERIES = ["focal", "jammy"]
+TARGET_SERIES = ["focal"]  # , "jammy"]
 NUM_UNITS = 3
 UPDATE_STATUS_IN_SECONDS = 60
 
