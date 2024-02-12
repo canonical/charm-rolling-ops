@@ -1,12 +1,15 @@
 # Copyright 2024 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Class for retriable rolling ops.
+"""Extends rolling ops to have retry APIs.
 
 There are two types of locks needed:
 1) The standard rolling-ops library
 2) Workload-specific lock - used in special cases where retrying to acquire
    the lock again via relations is not possible, e.g. storage-detaching.
+
+This class extends the original RollingOpsManager. Before working with it,
+make sure to understand the original RollingOpsManager documentation.
 
 The former is used to control rolling operations across a cluster, where
 we can reliably use the peer relation to orchestrate these activities. The
@@ -56,7 +59,7 @@ Rolling Ops. Normally, the system behaves just like the RollingOpsManager.
 If a node that has been granted the lock cannot proceed with its RunWithLock,
 the node can abandon the lock and try to reacquire it later. For that, it is
 enough to run a "defer" in the RunWithLock event OR raise:
-RollingOpsRetryLockLaterException.
+RollingOpsRetryLockLaterError.
 
 The charm leader will process any acquire requests from nodes as usual. If the
 running unit defers or raises an error, the _on_run_with_lock method will capture
@@ -77,13 +80,74 @@ departing and there are no units with the service stopped in the cluster.
 
 -------------------------------------------------------------------------------
 
+How to use?
+
+1) Implement the WorkloadLockManager interface
+2) Create an instance of the RetriableRollingOpsManager
+3) Observe the events as, original RollingOpsManager
+
+
+class MyWorkloadLockManager(WorkloadLockManager):
+    def acquire_lock(self):
+        # Acquire the workload lock
+        # ...
+
+    def is_departing(self) -> bool:
+        # Checks if the workload lock has been assigned and a unit is departing
+        # ...
+
+    def can_node_be_safe_stopped(self, unit) -> bool:
+        # Checks if a unit's workload is running
+        # We are interested in discovering if stopping this particular node will
+        # cause any issues to the cluster that are not transient.
+        # Stopping may trigger, e.g. a cluster to reassign leadership or shards, etc
+        # But these are transient tasks and should not block the lock.
+        # However, if restarting this node will, for example, take the only shard
+        # replica available, then we cannot restart it and should return False.
+        #
+        # Another example: if the node is not responsive and we are already on a cluster
+        # with a reduced number of nodes, we should not restart any other units and
+        # block (hence, return False).
+       
+        # ...
+
+
+class MyCharm(CharmBase):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.my_workload_lock_manager = MyWorkloadLockManager()
+        self.rolling_ops = RetriableRollingOpsManager(
+            self,
+            "my-relation",
+            workload_lock_manager=self.my_workload_lock_manager,
+            callback=self._on_run_with_lock,
+        )
+
+    def _on_start(self, event):
+        # Execute start logic
+        # ...
+        # Done, set the flag
+        self.rolling_ops.acquire_lock.emit(
+            callback_override="SOME_RESTART_METHOD"
+        )
+
+    def _on_storage_detaching(self, event):
+        # Do the storage-detaching operations
+        # ...
+        # Once the unit is ready to be removed, set the workload manager to departing
+        self.my_workload_lock_manager.acquire_lock()  # synchronous method
+        # ...
+        self.my_workload_lock_manager.release_lock()  # synchronous method
+
 """
 
 import logging
 from enum import Enum
+from typing import Any
 
 from charms.rolling_ops.v0.rollingops import Lock, Locks, LockState, RollingOpsManager
-
+from ops.framework import EventBase
+from ops.model import ActiveStatus, MaintenanceStatus
 
 # The unique Charmhub library identifier, never change it
 LIBID = "78caa49d36f7417b9c8750daa79627ce"
@@ -109,18 +173,41 @@ class RetriableLockState(Enum):
     - RETRY_LOCK: the lock should be retried later
     """
 
-    ACQUIRE = "acquire"
-    RELEASE = "release"
-    GRANTED = "granted"
-    IDLE = "idle"
+    # Rolling Ops Lock State
+    ACQUIRE = LockState.ACQUIRE.value
+    RELEASE = LockState.RELEASE.value
+    GRANTED = LockState.GRANTED.value
+    IDLE = LockState.IDLE.value
+
+    # Retriable Rolling Ops Lock State
     DEPARTING = "departing"
     RETRY_LOCK = "retry-lock"
     ACQUIRE_BUT_SVC_NOT_RESPONSIVE = "acquire-but-svc-not-responsive"
     STOPPED_BUT_NOT_REQUESTED = "stopped-but-not-requested"
 
 
-class RollingOpsRetryLockLaterException(Exception):
+class RollingOpsRetryLockLaterError(Exception):
     """Exception thrown when the lock should be retried later."""
+
+
+class WorkloadLockManager:
+    """Interface for the workload lock manager."""
+
+    def acquire_lock(self):
+        """Acquires the workload lock."""
+        raise NotImplementedError
+
+    def release_lock(self):
+        """Releases the workload lock."""
+        raise NotImplementedError
+
+    def is_departing(self) -> bool:
+        """Checks if the workload lock has been assigned and a unit is departing."""
+        return False
+
+    def can_node_be_safe_stopped(self, unit) -> bool:
+        """Checks if a unit's workload is running."""
+        return True
 
 
 class RetriableLock(Lock):
@@ -130,19 +217,16 @@ class RetriableLock(Lock):
         super().__init__(manager, unit=unit)
         self.manager = manager
         self.charm = manager.charm
-        # Run it once, so we can store the status of the unit.
-        if self.charm.unit == self.unit and self.unit_is_up:
-            self.started()
 
     @property
-    def unit_is_up(self) -> bool:
-        """Checks if the unit is up."""
-        return self.manager.workload_manager.is_node_up(self.unit)
+    def workload_lock_manager(self) -> WorkloadLockManager:
+        """Gets the workload lock manager."""
+        return self.manager.workload_manager or WorkloadLockManager()
 
     @property
     def _state(self) -> RetriableLockState:
         """Gets the lock state."""
-        if self.manager.workload_manager.is_departing():
+        if self.workload_lock_manager.is_departing():
             # Simple case, we will not process locks until the unit is removed.
             return RetriableLockState.DEPARTING
 
@@ -157,7 +241,7 @@ class RetriableLock(Lock):
             return RetriableLockState.RETRY_LOCK
 
         # Is the unit down?
-        if not self.unit_is_up:
+        if not self.workload_lock_manager.can_node_be_safe_stopped(self.unit):
             if app_state == RetriableLockState.ACQUIRE:
                 # The unit is requesting the lock.
                 return RetriableLockState.ACQUIRE_BUT_SVC_NOT_RESPONSIVE
@@ -222,8 +306,8 @@ class RetriableLock(Lock):
         """Method for checking if the unit has started."""
         return self.relation.data[self.unit].get("has_started") == "True"
 
-    def started(self):
-        """Sets the started flag.
+    def start(self):
+        """Sets the has_started flag.
 
         Should be called once the unit has finished its start process.
         """
@@ -260,21 +344,11 @@ class RetriableLocks(Locks):
             yield RetriableLock(self.manager, unit=unit)
 
 
-class WorkloadLockManager:
-    def is_departing(self) -> bool:
-        """Checks if the workload lock has been assigned and a unit is departing."""
-        raise NotImplementedError
-
-    def is_node_up(self, unit) -> bool:
-        """Checks if a unit's workload is running."""
-        raise NotImplementedError
-
-
 class RetriableRollingOpsManager(RollingOpsManager):
     """Class for controlling the locks in a retriable fashion.
 
     It differs from the main RollingOpsManager in two ways:
-    1) It will take into account the OpenSearchOpsLock status before granting locks
+    1) It will take into account the workload lock status before granting locks
     2) It will retry the lock acquisition if the restart-repeatable flag is set:
        that is used to indicate the unit requested the lock, but could not execute
        the operation because of a factor outside of its control. Use this resource
@@ -285,8 +359,8 @@ class RetriableRollingOpsManager(RollingOpsManager):
         self,
         charm,
         relation: str,
-        workload_lock_manager: WorkloadLockManager,
         callback: Any,
+        workload_lock_manager: WorkloadLockManager = None,
         acceptable_node_count_down: int = 0,
     ):
         """Constructor for the manager."""
@@ -338,26 +412,37 @@ class RetriableRollingOpsManager(RollingOpsManager):
         """Method for running with lock."""
         lock = RetriableLock(self, self.charm.unit)
         try:
-            super()._on_run_with_lock(event)
+            self.model.unit.status = MaintenanceStatus("Executing {} operation".format(self.name))
+            relation = self.model.get_relation(self.name)
+
+            # default to instance callback if not set
+            callback_name = relation.data[self.charm.unit].get(
+                "callback_override", self._callback.__name__
+            )
+            callback = getattr(self.charm, callback_name)
+            callback(event)
+
+            if self.model.unit.status.message == f"Executing {self.name} operation":
+                self.model.unit.status = ActiveStatus()
+
+            # Check if a defer happened
             if event.deferred:
-                raise RollingOpsRetryLockLaterException
+                raise RollingOpsRetryLockLaterError
+
+            lock.start()  # Successfully finished a first call
             return
-        except RollingOpsRetryLockLaterException:
+        except RollingOpsRetryLockLaterError:
             logger.info("Retrying to acquire the lock later.")
             lock.retrial_count = lock.retrial_count + 1
         except Exception as e:
             logger.exception(f"Error while running with lock: {str(e)}")
+            raise e
 
-        # A retriable error happened, raised by the callback method
-        # It means the logic after callback execution was not ran.
-        # Release the lock now, so we can reissue it later
-        lock.release()  # Updates relation data
-
-        # cleanup old callback overrides:
-        # we do not clean up the callback override, so we can reissue it later
-        # self.relation.data[self.charm.unit].update({"callback_override": ""})
-        if self.model.unit.status.message == f"Executing {self.name} operation":
-            self.model.unit.status = ActiveStatus()
+        finally:
+            # Release the lock now.
+            # If we need to retry, that will be performed later, at __init__ time in the next
+            # execution of a hook.
+            lock.release()  # Updates relation data
 
     def _on_process_locks(self, event: EventBase):  # noqa: C901
         """Processes the locks.
@@ -438,4 +523,3 @@ class RetriableRollingOpsManager(RollingOpsManager):
 
         if self.model.app.status.message == f"Beginning rolling {self.name}":
             self.model.app.status = ActiveStatus()
-
