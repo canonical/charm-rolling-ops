@@ -74,4 +74,4 @@ jobs:
       cloud: lxd
       juju-agent-version: ${{ matrix.juju.agent }}
       libjuju-version-constraint: ${{ matrix.juju.libjuju }}
-      juju-snap-channel: ${{ matrix.juju.juj-snap }}
+      juju-snap-channel: ${{ matrix.juju.juju-snap }}
