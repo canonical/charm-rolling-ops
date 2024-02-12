@@ -50,7 +50,8 @@ jobs:
       fail-fast: false
       matrix:
         juju:
-          - libjuju: ^3.2
+          - agent: 3.3.1
+            libjuju: ^3.2
             juju-snap: 3.3/stable
           - agent: 3.2.4
             libjuju: ^3
@@ -58,10 +59,8 @@ jobs:
           - agent: 3.1.7
             libjuju: ^3
             juju-snap: 3.1/stable
-          - agent: 3.1.6
-            libjuju: ^3
-            juju-snap: 3.1/stable
-          - libjuju: ^2,<3
+          - agent: 2.9.46
+            libjuju: ^2,<3
             juju-snap: 2.9/stable
     name: Integration test charm | ${{ matrix.juju.agent }}
     needs:
@@ -74,4 +73,3 @@ jobs:
       cloud: lxd
       juju-agent-version: ${{ matrix.juju.agent }}
       libjuju-version-constraint: ${{ matrix.juju.libjuju }}
-      juju-snap-channel: ${{ matrix.juju.juju-snap }}
