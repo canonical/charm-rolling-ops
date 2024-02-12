@@ -15,6 +15,7 @@
 
 """Sample charm using the rolling ops library."""
 
+import json
 import logging
 import time
 
@@ -119,11 +120,23 @@ class CharmRollingOpsCharm(CharmBase):
 
         result = []
         for lock in Locks(self.restart_manager):
-            result.append(lock.__dict__)
+            result.append(
+                json.dumps(
+                    {
+                        "unit-name": lock.unit.name,
+                        "status": str(lock._state),
+                        "useless-data": lock.relation.data[self.unit].get("useless-data", 0),
+                    }
+                )
+            )
         event.set_results(
             {
                 "lock-status-overall": result,
-                "timestamps": self.restart_manager._stored.timestamps,
+                "timestamps": str(
+                    self.restart_manager._stored.timestamps._stored_data.snapshot().get(
+                        "timestamps", {}
+                    )
+                ),
             }
         )
 
@@ -131,13 +144,8 @@ class CharmRollingOpsCharm(CharmBase):
         if not self.model.get_relation(self.restart_manager.name):
             event.fail("No restart relation found")
             return
-        if (
-            "useless-data"
-            not in self.model.get_relation(self.restart_manager.name).data[self.unit]
-        ):
-            self.model.get_relation(self.restart_manager.name).data[self.unit] = 0
-            return
-        self.model.get_relation(self.restart_manager.name).data[self.unit]["useless-data"] += 1
+        reldata = self.model.get_relation(self.restart_manager.name).data[self.unit]
+        reldata["useless-data"] = str(int(reldata.get("useless-data", 0)) + 1)
 
     def _restart(self, event):
         # In a production charm, we'd perhaps import the systemd library, and run

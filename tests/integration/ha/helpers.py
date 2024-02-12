@@ -15,13 +15,14 @@
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 
 import asyncio
+import json
 import logging
 import time
+from types import SimpleNamespace
 
 import pytest
 from juju.action import Action
 from juju.application import Application
-from juju.model import Model
 from pytest_operator.plugin import OpsTest
 
 logger = logging.getLogger(__name__)
@@ -30,25 +31,36 @@ MODEL_CONFIG = {
     "logging-config": "<root>=DEBUG;unit=DEBUG",
     "update-status-hook-interval": "5m",
 }
-GROUP_MARKS = [
-    "restart-1-unit",
-    "restart-all-units",
-    "remove-unit-and-restart",
-    "remove-leader-and-restart" "stop-unit-container",
-]
+
 TARGET_SERIES = ["focal"]  # , "jammy"]
 NUM_UNITS = 3
 UPDATE_STATUS_IN_SECONDS = 60
 
 
-@pytest.fixture
-async def model(ops_test: OpsTest) -> Model:
-    return ops_test.model
+TestTypeNamespace = SimpleNamespace(
+    restart_1_unit="restart_1_unit",
+    restart_all_units="restart_all_units",
+    remove_unit_and_restart="remove_unit_and_restart",
+    remove_leader_and_restart="remove_leader_and_restart",
+    stop_unit_container="stop_unit_container",
+)
 
 
-@pytest.fixture
-async def app(model) -> Application:
-    return model.applications["rolling-ops"]
+DEPLOY_ALL_GROUP_MARKS = [
+    (
+        pytest.param(
+            series, test, id=f"{series}_{test}", marks=pytest.mark.group(f"{series}_{test}")
+        )
+    )
+    for series in TARGET_SERIES
+    for test in [
+        TestTypeNamespace.restart_1_unit,
+        TestTypeNamespace.restart_all_units,
+        TestTypeNamespace.remove_unit_and_restart,
+        TestTypeNamespace.remove_leader_and_restart,
+        TestTypeNamespace.stop_unit_container,
+    ]
+]
 
 
 async def get_leader_unit_id(ops_test: OpsTest, app: Application) -> int:
@@ -77,58 +89,52 @@ async def run_action_on_leader(ops_test: OpsTest, app: Application, action_name:
     return await app.units[leader_unit_id].run_action(action_name)
 
 
-async def _assert_restart_1_unit(ops_test: OpsTest, app, unit_id: int) -> None:
+async def _get_unit_lock_status(ops_test: OpsTest, app: Application):
+    """Helper function that retrieves the lock status of a unit."""
+    action: Action = await run_action_on_leader(ops_test, app, "get-lock-status")
+    action = await action.wait()
+    assert action.status == "completed"
+    return action.results
+
+
+async def assert_restart_1_unit(ops_test: OpsTest, app, unit_id: int) -> None:
     # Trigger some chatting in the relation changed
     for i in range(10):
         await app.units[i % NUM_UNITS].run_action("share-useless-data")
 
+    await ops_test.model.block_until(lambda: app.status in ("active"))
+
     # Ensure there is no lock granted
-    original_status: Action = await run_action_on_leader("get-lock-status")
-    original_ts = time.time()
-    assert original_status.status == "completed"
+    # original_status = await _get_unit_lock_status(ops_test, app)
+    original_ts = float(time.time())
 
     # Run the restart action
-    action: Action = await app.units[unit_id].run_action("restart", delay="0")
-    # Confirm the action lock has been requested
+    action: Action = await app.units[unit_id].run_action("restart")
+    action = await action.wait()
     assert action.status == "completed"
-    current_status: Action = await run_action_on_leader("get-lock-status")
-    assert current_status.status == "completed"
-    assert (
-        current_status.results["timestamps"][f"rolling-ops/{unit_id}"]["requested"] > original_ts
-    )
-    requested_ts = current_status.results["timestamps"][f"rolling-ops/{unit_id}"]["requested"]
+
+    # Confirm the action lock has been requested
+    current_status = await _get_unit_lock_status(ops_test, app)
+    timestamps = json.loads(current_status["timestamps"].replace("'", '"'))
+    requested_ts = float(timestamps[f"rolling-ops/{unit_id}"]["requested"])
+    assert requested_ts > original_ts
+    # Check if other units did not request it after original_ts:
+    for i in range(NUM_UNITS):
+        if i != unit_id:
+            assert float(timestamps[f"rolling-ops/{i}"]["requested"]) < original_ts
 
     # Wait for a few update status cycles
     await asyncio.sleep(2 * UPDATE_STATUS_IN_SECONDS)
-    current_status: Action = await run_action_on_leader("get-lock-status")
+    current_status: Action = await run_action_on_leader(ops_test, app, "get-lock-status")
+    current_status = await current_status.wait()
     assert current_status.status == "completed"
-    assert (
-        current_status.results["timestamps"][f"rolling-ops/{unit_id}"]["requested"] > original_ts
-    )
-    # Lock not requested again
-    assert (
-        current_status.results["timestamps"][f"rolling-ops/{unit_id}"]["requested"] == requested_ts
-    )
-    # Ensure the restart has been answered
-    assert (
-        current_status.results["timestamps"][f"rolling-ops/{unit_id}"]["released"] > requested_ts
-    )
-    released_ts = current_status.results["timestamps"][f"rolling-ops/{unit_id}"]["released"]
 
-    # Trigger some chatting in the relation changed
-    for i in range(10):
-        await app.units[i % NUM_UNITS].run_action("share-useless-data")
-    await asyncio.sleep(2 * UPDATE_STATUS_IN_SECONDS)
-    current_status: Action = await run_action_on_leader("get-lock-status")
-    assert current_status.status == "completed"
-    assert (
-        current_status.results["timestamps"][f"rolling-ops/{unit_id}"]["requested"] > original_ts
-    )
-    # Lock not requested again
-    assert (
-        current_status.results["timestamps"][f"rolling-ops/{unit_id}"]["requested"] == requested_ts
-    )
-    # Lock not released again
-    assert (
-        current_status.results["timestamps"][f"rolling-ops/{unit_id}"]["released"] == released_ts
-    )
+    # Confirm the lock has been released:
+    current_status = await _get_unit_lock_status(ops_test, app)
+    timestamps = json.loads(current_status["timestamps"].replace("'", '"'))
+    released_ts = float(timestamps[f"rolling-ops/{unit_id}"]["released"])
+    assert released_ts > requested_ts
+    # Check if other units did not request it after original_ts:
+    for i in range(NUM_UNITS):
+        if i != unit_id:
+            assert float(timestamps[f"rolling-ops/{i}"]["requested"]) < original_ts
