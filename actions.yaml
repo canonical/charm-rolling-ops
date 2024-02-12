@@ -17,3 +17,10 @@ custom-restart:
       type: integer
       default: 0
 
+get-lock-status:
+  description: |
+    Must be executed in the leader. Returns the overall lock status of the cluster. 
+
+share-useless-data:
+  description: |
+    Triggers a relation-changed by sending some useless data to the peers.

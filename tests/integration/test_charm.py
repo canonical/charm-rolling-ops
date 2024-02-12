@@ -44,9 +44,10 @@ def get_restart_type(unit: Unit, model_name: str) -> str:
     return restart_type
 
 
+@pytest.mark.group(1)
 @pytest.mark.abort_on_fail
-async def test_smoke(ops_test: OpsTest):
-    """Basic smoke test following the default callback implementation.
+async def test_callback(ops_test: OpsTest):
+    """Basic test following the default callback implementation.
 
     Verify that we can deploy, and seem to be able to run a rolling op.
     """
@@ -86,11 +87,12 @@ async def test_smoke(ops_test: OpsTest):
             assert restart_type == action_type
 
 
+@pytest.mark.group(1)
 @pytest.mark.abort_on_fail
-async def test_smoke_single_unit(ops_test):
-    """Basic smoke test, on a single unit.
+async def test_single_unit(ops_test):
+    """Basic test, on a single unit.
 
-    Verify that deployment and rolling ops suceed for a single unit.
+    Verify that deployment and rolling ops succeed for a single unit.
     """
     # to spare the typechecker errors
     assert ops_test.model
