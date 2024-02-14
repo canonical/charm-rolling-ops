@@ -23,7 +23,7 @@ that will flush data to disk and exclude the unit from any voting/allocation.
 
 As everything happening in the storage-detaching must be atomic, we cannot
 rely on the peer relation and events being triggered later on in the process
-in other units. We must use the opensearch itself to store the lock info.
+in other units. We must use the application itself to store the lock info.
 That assures any unit can access locking information at any time, even during
 a storage-detaching event on a peer unit.
 
@@ -108,7 +108,7 @@ class MyWorkloadLockManager(WorkloadLockManager):
         # Another example: if the node is not responsive and we are already on a cluster
         # with a reduced number of nodes, we should not restart any other units and
         # block (hence, return False).
-       
+
         # ...
 
 
@@ -211,7 +211,7 @@ class WorkloadLockManager:
 
 
 class RetriableLock(Lock):
-    """Class for controlling the locks in OpenSearch Charm."""
+    """Models the lock with retry capabilities."""
 
     def __init__(self, manager, unit):
         super().__init__(manager, unit=unit)
@@ -241,7 +241,7 @@ class RetriableLock(Lock):
             return RetriableLockState.RETRY_LOCK
 
         # Is the unit down?
-        if not self.workload_lock_manager.can_node_be_safe_stopped(self.unit):
+        if not self.workload_lock_manager.can_node_be_safe_stopped():
             if app_state == RetriableLockState.ACQUIRE:
                 # The unit is requesting the lock.
                 return RetriableLockState.ACQUIRE_BUT_SVC_NOT_RESPONSIVE
@@ -313,7 +313,7 @@ class RetriableLock(Lock):
         """
         self.relation.data[self.unit]["has_started"] = "True"
 
-    def retry(self) -> bool:
+    def wants_retry(self) -> bool:
         """Method for checking if the lock should be retried."""
         return self._state == RetriableLockState.RETRY_LOCK
 
@@ -404,7 +404,7 @@ class RetriableRollingOpsManager(RollingOpsManager):
         lock = RetriableLock(self, self.charm.unit)
         return (
             # TODO: consider cases with a limitation in the amount of retries
-            lock.retry()
+            lock.wants_retry()
             and not (lock.is_held() or lock.is_pending())
         )
 
@@ -433,12 +433,24 @@ class RetriableRollingOpsManager(RollingOpsManager):
             return
         except RollingOpsRetryLockLaterError:
             logger.info("Retrying to acquire the lock later.")
-            lock.retrial_count = lock.retrial_count + 1
+            # This exception is acceptable. It means either the callback or the _on_run_with_lock
+            # wants to retry the lock later. Log that and proceed to the "finally" block.
+            pass
         except Exception as e:
             logger.exception(f"Error while running with lock: {str(e)}")
             raise e
 
         finally:
+            # Check if a defer happened here:
+            # 1) That ensures we check for a deferral even if an unexpected exception happend
+            # 2) We can release the lock, count it for a retrial and give the system a chance to
+            #    process to another unit.
+            if event.deferred:
+                # Defer is not acceptable in the locking system.
+                # Release the lock, finish the event and reissue a new acquire later
+                event.deferred = False
+                lock.retrial_count = lock.retrial_count + 1
+
             # Release the lock now.
             # If we need to retry, that will be performed later, at __init__ time in the next
             # execution of a hook.
@@ -493,8 +505,8 @@ class RetriableRollingOpsManager(RollingOpsManager):
 
         # Find the next lock we want to process. We check for lock priority
         # 1) Do we have any locks with: ACQUIRE_BUT_SVC_NOT_RESPONSIVE
-        # 2) Do we have any locks with: RETRY_LOCK
-        # 3) Do we have any locks with: ACQUIRE (all the remaining)
+        # 2) Do we have any locks with: ACQUIRE
+        # 3) Do we have any locks with: RETRY_LOCK (all the remaining)
         next_lock_to_process = None
         for lock in pending:
             # 1) Do we have any locks with: ACQUIRE_BUT_SVC_NOT_RESPONSIVE
@@ -502,17 +514,16 @@ class RetriableRollingOpsManager(RollingOpsManager):
                 next_lock_to_process = lock
                 break
 
-            # 2) Do we have any locks with: RETRY_LOCK
-            if lock.retry():
-                next_lock_to_process = lock
-                break
-
+        # 2) Do we have any locks with: ACQUIRE
         if not next_lock_to_process and pending:
-            # 3) Do we have any locks with: ACQUIRE (all the remaining)
             next_lock_to_process = pending[-1]
+        else:
+            # 3) Do we have any locks with: RETRY_LOCK (all the remaining)
+            for lock in pending:
+                if lock.wants_retry():
+                    next_lock_to_process = lock
+                    break
 
-        # If we reach this point, and we have pending units, we want to grant a lock to
-        # one of them.
         if next_lock_to_process:
             self.model.app.status = MaintenanceStatus("Beginning rolling {}".format(self.name))
             next_lock_to_process.grant()
