@@ -415,7 +415,13 @@ class RollingOpsManager(Object):
                 "callback_override", self._callback.__name__
             )
             # We have the callback override, reuse it in this acquire
+            # However, the lock not being granted, does not mean we cleaned the "acquire" from
+            # our own status. Therefore, even if we reeun the "acquire_lock" here, it will
+            # never generate any meaning relation-changed (there is no change on the databag
+            # from "acquire" to "acquire".
+            # To fix that, we will trigger manually a acquire lock
             self.charm.on[self.name].acquire_lock.emit(callback_name)
+            relation.data[self.charm.unit]["retry-count"] = str(int(relation.data[self.charm.unit].get("retry-count", 0)) + 1)
             return
 
         self.model.unit.status = MaintenanceStatus("Executing {} operation".format(self.name))
@@ -425,29 +431,18 @@ class RollingOpsManager(Object):
         callback_name = relation.data[self.charm.unit].get(
             "callback_override", self._callback.__name__
         )
+        callback = getattr(self.charm, callback_name)
+        callback(event)
 
-        try:
-            callback = getattr(self.charm, callback_name)
-            callback(event)
+        lock.release()  # Updates relation data
+        if lock.unit == self.model.unit:
+            self.charm.on[self.name].process_locks.emit()
 
-        except Exception as e:
-            logger.error(f"Error running callback {callback_name} failed: {e}")
-            raise e
+        # cleanup old callback overrides
+        relation.data[self.charm.unit].update({"callback_override": ""})
 
-        else:
-            if not event.deferred:
-                # We had no errors and we are not deferring this event, so we can release the lock
-                # cleanup old callback override and finish safely.
-                relation.data[self.charm.unit].update({"callback_override": ""})
+        # Now, we need to reset the retry-count, if we indeed used it.
+        relation.data[self.charm.unit]["retry-count"] = "0"
 
-        finally:
-            # Continue with the default path
-            if event.deferred:
-                logger.warning("Callback deferred. Release this lock and reacquire it later.")
-
-            lock.release()  # Updates relation data
-            if lock.unit == self.model.unit:
-                self.charm.on[self.name].process_locks.emit()
-
-            if self.model.unit.status.message == f"Executing {self.name} operation":
-                self.model.unit.status = ActiveStatus()
+        if self.model.unit.status.message == f"Executing {self.name} operation":
+            self.model.unit.status = ActiveStatus()
