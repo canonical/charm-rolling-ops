@@ -70,6 +70,7 @@ operation without restarting workloads that were able to successfully restart --
 omit the successful units from a subsequent run-action call.)
 
 """
+import os
 import logging
 from enum import Enum
 from typing import AnyStr, Callable, Optional
@@ -326,12 +327,23 @@ class RollingOpsManager(Object):
         Then, if we are the leader, fire off a process locks event.
 
         """
+        if self.name not in os.environ["JUJU_DISPATCH_PATH"]:
+            # Fixes gh#13: there is a chance, e.g. at the start of a deployment, where multiple hooks
+            # from different relations will be happening, all at the same time.
+            # It is also possible, in these situations, that the databag of hooks will differ, depending
+            # on which endpoint is being called. There is no guarantee from Juju it will be consistent
+            # across different hooks in different endpoints.
+            # Therefore, we want to be sure we are only seeing one single type of hook:
+            #       {self.name}-relation-...
+            # That will guarantee consistency across hook calls, and hence, databags.
+            logger.debug(f"Rolling Ops: We cannot call _on_relation_changed outside of the {self.name} hook")
+            event.defer()
+            return
+
         lock = Lock(self)
 
         if lock.is_pending():
             self.model.unit.status = WaitingStatus("Awaiting {} operation".format(self.name))
-        # elif self.model.unit.status.message == "Awaiting {} operation".format(self.name):
-        #     self.model.unit.status = ActiveStatus()
 
         if lock.is_held():
             self.charm.on[self.name].run_with_lock.emit()
