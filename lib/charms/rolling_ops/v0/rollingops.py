@@ -319,6 +319,15 @@ class RollingOpsManager(Object):
 
         """
         if self.name not in os.environ.get("JUJU_DISPATCH_PATH", ""):
+            # Fixes gh#13: there is a chance, e.g. at the start of a deployment, where multiple hooks
+            # from different relations will be happening, all at the same time.
+            # It is also possible, in these situations, that the databag of hooks will differ, depending
+            # on which endpoint is being called. There is no guarantee from Juju it will be consistent
+            # across different hooks in different endpoints.
+            # Therefore, we want to be sure we are only seeing one single type of hook:
+            #       {self.name}-relation-...
+            # That will guarantee consistency across hook calls, and hence, databags.
+            logger.warning(f"Abandon {event} as we are executing it outside of {self.name} hook context")
             return
 
         lock = Lock(self)
@@ -394,6 +403,7 @@ class RollingOpsManager(Object):
             # we are running in the {self.name}-relation. Given we can defer this
             # event, we need to be careful we're only executing the run-with-lock
             # when we have been actually granted the lock.
+            logger.warning(f"Tried to execute {event} outside of {self.name} context, defer")
             event.defer()
             return
         
