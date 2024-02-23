@@ -70,6 +70,7 @@ operation without restarting workloads that were able to successfully restart --
 omit the successful units from a subsequent run-action call.)
 
 """
+import os
 import logging
 from enum import Enum
 from typing import AnyStr, Callable, Optional
@@ -394,6 +395,22 @@ class RollingOpsManager(Object):
 
     def _on_run_with_lock(self: CharmBase, event: RunWithLock):
         lock = Lock(self)
+        if not lock.is_held():
+            logger.warning("Lock not held anymore. Abandon this event and reacquire it.")
+            relation = self.model.get_relation(self.name)
+            callback_name = relation.data[self.charm.unit].get(
+                "callback_override", self._callback.__name__
+            )
+            # We have the callback override, reuse it in this acquire
+            # However, the lock not being granted, does not mean we cleaned the "acquire" from
+            # our own status. Therefore, even if we reeun the "acquire_lock" here, it will
+            # never generate any meaning relation-changed (there is no change on the databag
+            # from "acquire" to "acquire".
+            # To fix that, we will trigger manually a acquire lock
+            self.charm.on[self.name].acquire_lock.emit(callback_name)
+            relation.data[self.charm.unit]["retry-count"] = str(int(relation.data[self.charm.unit].get("retry-count", 0)) + 1)
+            return
+
         self.model.unit.status = MaintenanceStatus("Executing {} operation".format(self.name))
         relation = self.model.get_relation(self.name)
 
@@ -410,6 +427,9 @@ class RollingOpsManager(Object):
 
         # cleanup old callback overrides
         relation.data[self.charm.unit].update({"callback_override": ""})
+
+        # Now, we need to reset the retry-count, if we indeed used it.
+        relation.data[self.charm.unit]["retry-count"] = "0"
 
         if self.model.unit.status.message == f"Executing {self.name} operation":
             self.model.unit.status = ActiveStatus()
