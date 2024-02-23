@@ -88,7 +88,7 @@ LIBAPI = 0
 
 # Increment this PATCH version before using `charmcraft publish-lib` or reset
 # to 0 if you are raising the major API version
-LIBPATCH = 5
+LIBPATCH = 6
 
 
 class LockNoRelationError(Exception):
@@ -272,12 +272,6 @@ class AcquireLock(EventBase):
         self.callback_override = snapshot["callback_override"]
 
 
-class ProcessLocks(EventBase):
-    """Used to tell the leader to process all locks."""
-
-    pass
-
-
 class RollingOpsManager(Object):
     """Emitters and handlers for rolling ops."""
 
@@ -302,13 +296,11 @@ class RollingOpsManager(Object):
 
         charm.on.define_event("{}_run_with_lock".format(self.name), RunWithLock)
         charm.on.define_event("{}_acquire_lock".format(self.name), AcquireLock)
-        charm.on.define_event("{}_process_locks".format(self.name), ProcessLocks)
 
         # Watch those events (plus the built in relation event).
         self.framework.observe(charm.on[self.name].relation_changed, self._on_relation_changed)
         self.framework.observe(charm.on[self.name].acquire_lock, self._on_acquire_lock)
         self.framework.observe(charm.on[self.name].run_with_lock, self._on_run_with_lock)
-        self.framework.observe(charm.on[self.name].process_locks, self._on_process_locks)
 
     def _callback(self: CharmBase, event: EventBase) -> None:
         """Placeholder for the function that actually runs our event.
@@ -338,9 +330,9 @@ class RollingOpsManager(Object):
             self.charm.on[self.name].run_with_lock.emit()
 
         if self.model.unit.is_leader():
-            self.charm.on[self.name].process_locks.emit()
+            self._on_process_locks()
 
-    def _on_process_locks(self: CharmBase, event: ProcessLocks):
+    def _on_process_locks(self: CharmBase):
         """Process locks.
 
         Runs only on the leader. Updates the status of all locks.
@@ -396,6 +388,15 @@ class RollingOpsManager(Object):
             event.defer()
 
     def _on_run_with_lock(self: CharmBase, event: RunWithLock):
+
+        if self.name not in os.environ.get("JUJU_DISPATCH_PATH", ""):
+            # We can only guarantee to have the correct databag information when
+            # we are running in the {self.name}-relation. Given we can defer this
+            # event, we need to be careful we're only executing the run-with-lock
+            # when we have been actually granted the lock.
+            event.defer()
+            return
+        
         lock = Lock(self)
         self.model.unit.status = MaintenanceStatus("Executing {} operation".format(self.name))
         relation = self.model.get_relation(self.name)
