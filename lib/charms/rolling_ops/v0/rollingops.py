@@ -326,6 +326,9 @@ class RollingOpsManager(Object):
         Then, if we are the leader, fire off a process locks event.
 
         """
+        if self.name not in os.environ.get("JUJU_DISPATCH_PATH", ""):
+            return
+
         lock = Lock(self)
 
         if lock.is_pending():
