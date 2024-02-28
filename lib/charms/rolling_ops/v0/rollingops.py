@@ -327,7 +327,6 @@ class RollingOpsManager(Object):
             # Therefore, we want to be sure we are only seeing one single type of hook:
             #       {self.name}-relation-...
             # That will guarantee consistency across hook calls, and hence, databags.
-            logger.warning(f"Abandon {event} as we are executing it outside of {self.name} hook context")
             return
 
         lock = Lock(self)
