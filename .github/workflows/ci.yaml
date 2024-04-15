@@ -44,6 +44,6 @@ jobs:
       - build
     uses: canonical/data-platform-workflows/.github/workflows/integration_test_charm.yaml@v13.1.0
     with:
-      artifact-prefix: packed-charm-cache-true
+      artifact-prefix: ${{ needs.build.outputs.artifact-prefix }}
       cloud: lxd
       juju-snap-channel: 3.4/stable
