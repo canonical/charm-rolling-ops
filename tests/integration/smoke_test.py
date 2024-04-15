@@ -29,7 +29,6 @@ from pytest_operator.plugin import OpsTest
 logger = logging.getLogger(__name__)
 
 
-@pytest.mark.group(1)
 def get_restart_type(unit: Unit, model_name: str) -> str:
     show_unit_json = subprocess.check_output(
         f"JUJU_MODEL={model_name} juju show-unit {unit.name} --format json",
