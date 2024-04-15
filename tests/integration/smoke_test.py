@@ -29,6 +29,7 @@ from pytest_operator.plugin import OpsTest
 logger = logging.getLogger(__name__)
 
 
+@pytest.mark.group(1)
 def get_restart_type(unit: Unit, model_name: str) -> str:
     show_unit_json = subprocess.check_output(
         f"JUJU_MODEL={model_name} juju show-unit {unit.name} --format json",
@@ -45,6 +46,7 @@ def get_restart_type(unit: Unit, model_name: str) -> str:
 
 
 @pytest.mark.abort_on_fail
+@pytest.mark.group(1)
 async def test_smoke(ops_test: OpsTest):
     """Basic smoke test following the default callback implementation.
 
@@ -87,6 +89,7 @@ async def test_smoke(ops_test: OpsTest):
 
 
 @pytest.mark.abort_on_fail
+@pytest.mark.group(1)
 async def test_smoke_single_unit(ops_test):
     """Basic smoke test, on a single unit.
 
