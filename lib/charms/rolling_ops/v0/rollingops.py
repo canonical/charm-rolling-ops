@@ -49,7 +49,7 @@ class SomeCharm(...):
 
 To kick off the rolling restart, emit this library's AcquireLock event. The simplest way
 to do so would be with an action, though it might make sense to acquire the lock in
-response to another event. 
+response to another event.
 
 ```python
     def _on_trigger_restart(self, event):
@@ -266,9 +266,11 @@ class AcquireLock(EventBase):
         self.callback_override = callback_override or ""
 
     def snapshot(self):
+        """Returns current snapshot callback."""
         return {"callback_override": self.callback_override}
 
     def restore(self, snapshot):
+        """Sets callback from snapshot."""
         self.callback_override = snapshot["callback_override"]
 
 

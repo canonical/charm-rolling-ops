@@ -90,7 +90,7 @@ async def test_smoke(ops_test: OpsTest):
 async def test_smoke_single_unit(ops_test):
     """Basic smoke test, on a single unit.
 
-    Verify that deployment and rolling ops suceed for a single unit.
+    Verify that deployment and rolling ops succeed for a single unit.
     """
     # to spare the typechecker errors
     assert ops_test.model
