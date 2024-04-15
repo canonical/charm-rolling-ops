@@ -39,6 +39,10 @@ jobs:
   integration-test-ubuntu:
     name: Integration tests
     runs-on: ubuntu-22.04
+    needs:
+      - build
+      - unit-test
+      - lint
     steps:
       - name: Checkout
         uses: actions/checkout@v3
