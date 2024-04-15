@@ -1,3 +1,13 @@
+# Copyright 2024 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+[tool.poetry]
+# Charm is not packed as a standard Python package; this information is not used
+name = "charm"
+version = "0.1.0"
+description = ""
+authors = []
+
 # Testing tools configuration
 [tool.coverage.run]
 branch = true
