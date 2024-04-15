@@ -31,6 +31,17 @@ copyright-check = "True"
 copyright-author = "Canonical Ltd."
 copyright-regexp = "Copyright\\s\\d{4}([-,]\\d{4})*\\s+%(author)s"
 
+
+[tool.poetry.group.integration.dependencies]
+pytest = "^8.1.1"
+pytest-github-secrets = {git = "https://github.com/canonical/data-platform-workflows", tag = "v13.1.0", subdirectory = "python/pytest_plugins/github_secrets"}
+pytest-operator = "^0.34.0"
+pytest-operator-cache = {git = "https://github.com/canonical/data-platform-workflows", tag = "v13.1.0", subdirectory = "python/pytest_plugins/pytest_operator_cache"}
+pytest-operator-groups = {git = "https://github.com/canonical/data-platform-workflows", tag = "v13.1.0", subdirectory = "python/pytest_plugins/pytest_operator_groups"}
+juju = "^3.2.2"
+ops = "^2.12.0"
+
+
 [tool.pytest.ini_options]
 minversion = "6.0"
 log_cli_level = "INFO"
