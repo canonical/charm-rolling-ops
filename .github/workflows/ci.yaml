@@ -36,17 +36,14 @@ jobs:
     with:
       cache: true
 
-  integration-test-ubuntu:
-    name: Integration tests
-    runs-on: ubuntu-22.04
+  integration-test:
+    name: Integration test charm
     needs:
-      - build
-      - unit-test
       - lint
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: Install dependencies
-        run: sudo python -m pip install tox
-      - name: Run integration tests
-        run: tox run -e integration
+      - unit-test
+      - build
+    uses: canonical/data-platform-workflows/.github/workflows/integration_test_charm.yaml@v13.1.0
+    with:
+      artifact-prefix: packed-charm-cache-true
+      cloud: lxd
+      juju-snap-channel: 3.4/stable
