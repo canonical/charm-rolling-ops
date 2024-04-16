@@ -124,7 +124,9 @@ async def test_smoke_single_unit(ops_test):
         assert app.status != "error"
 
         await action.wait()
-        assert action.results.get("return-code", None) == 0
+        assert (action.results.get("return-code", None) == 0) or (
+            action.results.get("Code", None) == 0
+        )
 
         await model.block_until(lambda: app.status in ("error", "blocked", "active"), timeout=60)
         assert app.status == "active"
