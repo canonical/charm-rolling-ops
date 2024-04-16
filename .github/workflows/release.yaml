@@ -23,6 +23,7 @@ jobs:
     name: Release bumped library
     runs-on: ubuntu-22.04
     needs:
+      - ci-tests
       - build
     steps:
       - name: Checkout
@@ -38,6 +39,7 @@ jobs:
   release:
     name: Release charm
     needs:
+      - ci-tests
       - build
     uses: canonical/data-platform-workflows/.github/workflows/release_charm.yaml@v13.1.0
     with:
