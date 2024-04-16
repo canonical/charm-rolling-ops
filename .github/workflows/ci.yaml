@@ -9,6 +9,9 @@ concurrency:
 on:
   pull_request:
   # Triggered on push to branch "main" by .github/workflows/release.yaml
+  schedule:
+    - cron: '53 0 * * *' # Daily at 00:53 UTC
+  # Triggered on push to branch "main" by .github/workflows/release.yaml
   workflow_call:
 
 jobs:
@@ -37,7 +40,15 @@ jobs:
       cache: true
 
   integration-test:
-    name: Integration test charm
+    strategy:
+      fail-fast: false
+      matrix:
+        juju:
+          - juju-snap: 3.4/stable
+            libjuju: ^3.2
+          - juju-snap: 2.9/stable
+            libjuju: ^2,<3
+    name: Integration test charm | ${{ matrix.juju.juju-snap }}
     needs:
       - lint
       - unit-test
@@ -46,4 +57,5 @@ jobs:
     with:
       artifact-prefix: ${{ needs.build.outputs.artifact-prefix }}
       cloud: lxd
-      juju-snap-channel: 3.4/stable
+      juju-snap-channel: ${{ matrix.juju.juju-snap }}
+      libjuju-version-constraint: ${{ matrix.juju.libjuju }}
