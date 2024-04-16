@@ -1,4 +1,5 @@
 # rolling-ops
+[![Tests](https://github.com/canonical/charm-rolling-ops/actions/workflows/ci.yaml/badge.svg)](https://github.com/canonical/charm-rolling-ops/actions/workflows/ci.yaml)
 
 ## Description
 
