@@ -74,7 +74,9 @@ async def test_smoke(ops_test: OpsTest):
             logger.info(f"{action_type} - {unit.name}")
             action: Action = await unit.run_action(action_type, delay=1)
             await action.wait()
-            assert action.results.get("return-code", None) == 0
+            assert (action.results.get("return-code", None) == 0) or (
+                action.results.get("Code", None) == 0
+            )
 
         await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
         assert app.status != "error"
