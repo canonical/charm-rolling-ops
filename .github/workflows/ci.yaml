@@ -35,18 +35,26 @@ jobs:
 
   build:
     name: Build charm
+    needs:
+      - lint
+      - unit-test
     uses: canonical/data-platform-workflows/.github/workflows/build_charm.yaml@v13.1.0
     with:
       cache: true
 
   integration-test:
-    name: Integration test charm
+    strategy:
+      fail-fast: false
+      matrix:
+        juju:
+          - snap-channel: 3.4/stable
+          - snap-channel: 2.9/stable
+        cloud: [lxd, k8s]
+    name: Integration test charm | ${{ matrix.juju.snap-channel }}
     needs:
-      - lint
-      - unit-test
       - build
     uses: canonical/data-platform-workflows/.github/workflows/integration_test_charm.yaml@v13.1.0
     with:
       artifact-prefix: ${{ needs.build.outputs.artifact-prefix }}
-      cloud: lxd
-      juju-snap-channel: 3.4/stable
+      cloud: ${{ matrix.cloud }}
+      juju-snap-channel: ${{ matrix.juju.snap-channel }}

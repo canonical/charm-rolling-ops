@@ -15,11 +15,15 @@ jobs:
 
   build:
     name: Build charm
+    needs:
+      - ci-tests
     uses: canonical/data-platform-workflows/.github/workflows/build_charm.yaml@v13.1.0
 
   release-libs:
     name: Release bumped library
     runs-on: ubuntu-22.04
+    needs:
+      - build
     steps:
       - name: Checkout
         uses: actions/checkout@v3
