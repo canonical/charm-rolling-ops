@@ -52,7 +52,7 @@ jobs:
             libjuju: ==2.9.46.1
         cloud: 
           - substrate: lxd
-          - subtrate: microk8s
+          - substrate: microk8s
             microk8s-snap-channel: 1.29-strict/stable
     name: Integration test charm | ${{ matrix.juju.snap-channel }} | ${{ matrix.cloud.substrate }}
     needs:
