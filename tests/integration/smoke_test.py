@@ -75,7 +75,7 @@ async def test_smoke(ops_test: OpsTest):
             action: Action = await unit.run_action(action_type, delay=1)
             await action.wait()
             assert (action.results.get("return-code", None) == 0) or (
-                action.results.get("Code", None) == 0
+                action.results.get("Code", None) == "0"
             )
 
         await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
@@ -125,7 +125,7 @@ async def test_smoke_single_unit(ops_test):
 
         await action.wait()
         assert (action.results.get("return-code", None) == 0) or (
-            action.results.get("Code", None) == 0
+            action.results.get("Code", None) == "0"
         )
 
         await model.block_until(lambda: app.status in ("error", "blocked", "active"), timeout=60)
