@@ -1,4 +1,4 @@
-# Copyright 2022 Penny Gale
+# Copyright 2022 Canonical Ltd.
 # See LICENSE file for licensing details.
 
 name: rolling-ops
@@ -12,7 +12,7 @@ issues: https://github.com/canonical/charm-rolling-ops/issues
 website:
   - https://charmhub.io/rolling-ops
   - https://github.com/canonical/charm-rolling-ops
-  - https://matrix.to/#/#charmhub-data-platform:ubuntu.com
+  - https://matrix.to/#/%23charmhub-data-platform%3Aubuntu.com
   - https://chat.charmhub.io/charmhub/channels/data-platform
 maintainers:
   - Canonical Data Platform <data-platform@lists.launchpad.net>
