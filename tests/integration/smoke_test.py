@@ -45,6 +45,7 @@ def get_restart_type(unit: Unit, model_name: str) -> str:
 
 
 @pytest.mark.abort_on_fail
+@pytest.mark.group(1)
 async def test_smoke(ops_test: OpsTest):
     """Basic smoke test following the default callback implementation.
 
@@ -73,7 +74,9 @@ async def test_smoke(ops_test: OpsTest):
             logger.info(f"{action_type} - {unit.name}")
             action: Action = await unit.run_action(action_type, delay=1)
             await action.wait()
-            assert action.results.get("return-code", None) == 0
+            assert (action.results.get("return-code", None) == 0) or (
+                action.results.get("Code", None) == "0"
+            )
 
         await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
         assert app.status != "error"
@@ -87,10 +90,11 @@ async def test_smoke(ops_test: OpsTest):
 
 
 @pytest.mark.abort_on_fail
+@pytest.mark.group(1)
 async def test_smoke_single_unit(ops_test):
     """Basic smoke test, on a single unit.
 
-    Verify that deployment and rolling ops suceed for a single unit.
+    Verify that deployment and rolling ops succeed for a single unit.
     """
     # to spare the typechecker errors
     assert ops_test.model
@@ -120,7 +124,9 @@ async def test_smoke_single_unit(ops_test):
         assert app.status != "error"
 
         await action.wait()
-        assert action.results.get("return-code", None) == 0
+        assert (action.results.get("return-code", None) == 0) or (
+            action.results.get("Code", None) == "0"
+        )
 
         await model.block_until(lambda: app.status in ("error", "blocked", "active"), timeout=60)
         assert app.status == "active"

@@ -38,6 +38,7 @@ class TestCharm(unittest.TestCase):
     def test_acquire(self):
         # A human operator runs the "restart" action.
         action_event = Mock()
+        action_event.callback_override = "_custom_restart"
         self.harness.charm.restart_manager._on_acquire_lock(action_event)
 
         data = self.harness.charm.model.relations["restart"][0].data

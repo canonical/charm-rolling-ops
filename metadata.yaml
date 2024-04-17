@@ -1,15 +1,22 @@
 # Copyright 2022 Penny Gale
 # See LICENSE file for licensing details.
 
-# For a complete list of supported options, see:
-# https://juju.is/docs/sdk/metadata-reference
 name: rolling-ops
-display-name: |
-  Rolling Ops Library and Example Charm
+display-name: Rolling Ops Library and Example Charm
+summary: Sample charm and re-usable library.,
 description: |
   This is a charm containing the Rolling Ops library, along with a sample implementation.
-summary: |
-  Sample charm and re-usable library.,
+docs: https://discourse.charmhub.io/t/rolling-ops-example-app-overview/13939
+source: https://github.com/canonical/charm-rolling-ops
+issues: https://github.com/canonical/charm-rolling-ops/issues
+website:
+  - https://charmhub.io/rolling-ops
+  - https://github.com/canonical/charm-rolling-ops
+  - https://matrix.to/#/#charmhub-data-platform:ubuntu.com
+  - https://chat.charmhub.io/charmhub/channels/data-platform
+maintainers:
+  - Canonical Data Platform <data-platform@lists.launchpad.net>
+
 bases:
   - name: ubuntu
     channel: focal
