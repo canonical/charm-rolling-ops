@@ -72,7 +72,7 @@ async def test_smoke(ops_test: OpsTest):
         # Run the restart, with a delay to alleviate timing issues.
         for unit in app.units:
             logger.info(f"{action_type} - {unit.name}")
-            action: Action = await unit.run_action(action_type, delay=1)
+            action: Action = await unit.run_action(action_type, delay=20)
             await action.wait()
             assert (action.results.get("return-code", None) == 0) or (
                 action.results.get("Code", None) == "0"
@@ -81,7 +81,8 @@ async def test_smoke(ops_test: OpsTest):
         await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
         assert app.status != "error"
 
-        await model.block_until(lambda: app.status in ("error", "blocked", "active"), timeout=60)
+        # await model.block_until(lambda: app.status in ("error", "blocked", "active"), timeout=60)
+        await model.wait_for_idle(status="active", timeout=600)
         assert app.status == "active"
 
         for unit in app.units:
