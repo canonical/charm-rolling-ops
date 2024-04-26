@@ -137,13 +137,11 @@ async def test_smoke_single_unit(ops_test):
 @pytest.mark.abort_on_fail
 @pytest.mark.group(1)
 async def test_scale_up(ops_test: OpsTest):
-    """Scale the application back up, restart again.
-    """
+    """Scale the application back up, restart again."""
     # to spare the typechecker errors
     assert ops_test.model
     assert ops_test.model_full_name
     model: Model = ops_test.model
-    model_full_name: str = ops_test.model_full_name
 
     # to spare the typechecker errors
     assert model.applications["rolling-ops"]
@@ -159,12 +157,13 @@ async def test_scale_up(ops_test: OpsTest):
     # Run the restart for all units
     for unit in app.units:
         logger.info(f"restart - {unit.name}")
-        action: Action = await unit.run_action("restart", delay=10)
+        await unit.run_action("restart", delay=10)
 
     await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
     assert app.status != "error"
 
     await model.wait_for_idle(status="active", timeout=600)
+
 
 @pytest.mark.abort_on_fail
 @pytest.mark.group(1)
@@ -177,7 +176,6 @@ async def test_on_delete(ops_test: OpsTest):
     assert ops_test.model
     assert ops_test.model_full_name
     model: Model = ops_test.model
-    model_full_name: str = ops_test.model_full_name
 
     # to spare the typechecker errors
     assert model.applications["rolling-ops"]
@@ -187,7 +185,7 @@ async def test_on_delete(ops_test: OpsTest):
     # We don't wait for the restart operation to finish before removing it
     for unit in app.units:
         logger.info(f"restart - {unit.name}")
-        action: Action = await unit.run_action("restart", delay=30)
+        await unit.run_action("restart", delay=30)
 
     await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
     assert app.status != "error"
