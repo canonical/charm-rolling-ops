@@ -199,9 +199,13 @@ async def test_on_delete(ops_test: OpsTest):
     await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
     assert app.status != "error"
 
-    for unit in app.units:
-        logger.info(f"removing unit - {unit.name}")
-        await app.destroy_unit(unit.name)
+    try:
+        logger.info("MicroK8s: Scaling application to 0")
+        await app.scale(0)
+    except JujuAPIError:  # handling vm vs k8s
+        for unit in app.units:
+            logger.info(f"LXD: removing unit - {unit.name}")
+            await app.destroy_unit(unit.name)
 
     await model.block_until(lambda: len(app.units) == 0, timeout=600)
     assert app.status != "error"
