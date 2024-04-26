@@ -142,6 +142,7 @@ async def test_scale_up(ops_test: OpsTest):
     assert ops_test.model
     assert ops_test.model_full_name
     model: Model = ops_test.model
+    model_full_name: str = ops_test.model_full_name
 
     # to spare the typechecker errors
     assert model.applications["rolling-ops"]
@@ -158,11 +159,19 @@ async def test_scale_up(ops_test: OpsTest):
     for unit in app.units:
         logger.info(f"restart - {unit.name}")
         await unit.run_action("restart", delay=10)
+        await action.wait()
+        assert (action.results.get("return-code", None) == 0) or (
+            action.results.get("Code", None) == "0"
+        )
 
     await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
     assert app.status != "error"
 
     await model.wait_for_idle(status="active", timeout=600)
+
+    for unit in app.units:
+        restart_type = get_restart_type(unit=unit, model_name=model_full_name)
+        assert restart_type == "restart"
 
 
 @pytest.mark.abort_on_fail
@@ -185,9 +194,15 @@ async def test_on_delete(ops_test: OpsTest):
     # We don't wait for the restart operation to finish before removing it
     for unit in app.units:
         logger.info(f"restart - {unit.name}")
-        await unit.run_action("restart", delay=30)
+        await unit.run_action("restart", delay=60)
 
     await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
     assert app.status != "error"
 
+    for unit in app.units:
+        logger.info(f"removing unit - {unit.name}")
+        await app.destroy_unit(unit.name)
+    
+    await model.block_until(lambda: len(app.units) == 0, timeout=600)
+    assert app.status != "error"
     await ops_test.model.remove_application("rolling-ops", block_until_done=True)
