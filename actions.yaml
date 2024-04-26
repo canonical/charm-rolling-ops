@@ -10,7 +10,7 @@ restart:
       default: 0
 
 custom-restart:
-  description: "Example restart with a custom callback function. Used in testing"
+  description: Example restart with a custom callback function. Used in testing
   params:
     delay:
       description: "Introduce an artificial delay (for testing)."
