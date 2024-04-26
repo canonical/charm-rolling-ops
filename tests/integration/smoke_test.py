@@ -158,7 +158,7 @@ async def test_scale_up(ops_test: OpsTest):
     # Run the restart for all units
     for unit in app.units:
         logger.info(f"restart - {unit.name}")
-        await unit.run_action("restart", delay=10)
+        action: Action = await unit.run_action("restart", delay=10)
         await action.wait()
         assert (action.results.get("return-code", None) == 0) or (
             action.results.get("Code", None) == "0"
@@ -202,7 +202,7 @@ async def test_on_delete(ops_test: OpsTest):
     for unit in app.units:
         logger.info(f"removing unit - {unit.name}")
         await app.destroy_unit(unit.name)
-    
+
     await model.block_until(lambda: len(app.units) == 0, timeout=600)
     assert app.status != "error"
     await ops_test.model.remove_application("rolling-ops", block_until_done=True)
