@@ -48,6 +48,7 @@ jobs:
       matrix:
         juju: 
           - snap-channel: 3.4/stable 
+          - snap-channel: 3.1/stable 
           - snap-channel: 2.9/stable
             libjuju: ==2.9.46.1
         cloud: 
