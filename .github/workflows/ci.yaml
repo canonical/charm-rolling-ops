@@ -46,15 +46,15 @@ jobs:
       fail-fast: false
       matrix:
         juju: 
-          - snap-channel: 3.4/stable 
-          - snap-channel: 3.1/stable 
-          - snap-channel: 2.9/stable
+          - agent: 3.4.6  # renovate: juju-agent-pin-minor
+          - agent: 3.1.10  # renovate: juju-agent-pin-minor
+          - agent: 2.9.51  # renovate: juju-agent-pin-minor
             libjuju: ^2
         cloud: 
           - substrate: lxd
           - substrate: microk8s
             microk8s-snap-channel: 1.29-strict/stable  # renovate: latest microk8s
-    name: Integration test charm | ${{ matrix.juju.snap-channel }} | ${{ matrix.cloud.substrate }}
+    name: Integration test charm | ${{ matrix.juju.agent }} | ${{ matrix.cloud.substrate }}
     needs:
       - build
     uses: canonical/data-platform-workflows/.github/workflows/integration_test_charm.yaml@v23.0.5
@@ -62,5 +62,5 @@ jobs:
       artifact-prefix: ${{ needs.build.outputs.artifact-prefix }}
       cloud: ${{ matrix.cloud.substrate }}
       microk8s-snap-channel: ${{ matrix.cloud.microk8s-snap-channel }}
-      juju-snap-channel: ${{ matrix.juju.snap-channel }}
+      juju-agent-version: ${{ matrix.juju.agent }}
       libjuju-version-constraint: ${{ matrix.juju.libjuju }}
