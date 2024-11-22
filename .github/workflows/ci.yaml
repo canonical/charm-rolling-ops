@@ -39,7 +39,7 @@ jobs:
       - unit-test
     uses: canonical/data-platform-workflows/.github/workflows/build_charm.yaml@v23.0.5
     with:
-      cache: true
+      cache: false
 
   integration-test:
     strategy:
