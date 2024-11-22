@@ -17,7 +17,7 @@ jobs:
     name: Build charm
     needs:
       - ci-tests
-    uses: canonical/data-platform-workflows/.github/workflows/build_charm.yaml@v13.1.0
+    uses: canonical/data-platform-workflows/.github/workflows/build_charm.yaml@v23.0.5
 
   release-libs:
     name: Release bumped library

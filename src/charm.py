@@ -55,17 +55,17 @@ class CharmRollingOpsCharm(CharmBase):
             time.sleep(int(self._stored.delay))
         self._stored.restarted = True
 
-        self.model.get_relation(self.restart_manager.name).data[self.unit].update(
-            {"restart-type": "restart"}
-        )
+        self.model.get_relation(self.restart_manager.name).data[self.unit].update({
+            "restart-type": "restart"
+        })
 
     def _custom_restart(self, event):
         if self._stored.delay:
             time.sleep(int(self._stored.delay))
 
-        self.model.get_relation(self.restart_manager.name).data[self.unit].update(
-            {"restart-type": "custom-restart"}
-        )
+        self.model.get_relation(self.restart_manager.name).data[self.unit].update({
+            "restart-type": "custom-restart"
+        })
 
     def _on_install(self, event):
         self.unit.status = ActiveStatus()
