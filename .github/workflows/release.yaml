@@ -41,7 +41,7 @@ jobs:
     needs:
       - ci-tests
       - build
-    uses: canonical/data-platform-workflows/.github/workflows/release_charm.yaml@v13.1.0
+    uses: canonical/data-platform-workflows/.github/workflows/release_charm.yaml@v23.0.5
     with:
       channel: latest/edge
       artifact-prefix: ${{ needs.build.outputs.artifact-prefix }}
