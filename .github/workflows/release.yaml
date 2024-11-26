@@ -31,7 +31,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Release bumped charm library
-        uses: canonical/charming-actions/release-libraries@2.2.3
+        uses: canonical/charming-actions/release-libraries@2.6.3
         with:
           credentials: "${{ secrets.CHARMHUB_TOKEN }}"
           github-token: "${{ secrets.GITHUB_TOKEN }}"
@@ -41,7 +41,7 @@ jobs:
     needs:
       - ci-tests
       - build
-    uses: canonical/data-platform-workflows/.github/workflows/release_charm.yaml@v13.1.0
+    uses: canonical/data-platform-workflows/.github/workflows/release_charm.yaml@v23.0.5
     with:
       channel: latest/edge
       artifact-prefix: ${{ needs.build.outputs.artifact-prefix }}
