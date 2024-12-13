@@ -53,7 +53,7 @@ jobs:
         cloud: 
           - substrate: lxd
           - substrate: microk8s
-            microk8s-snap-channel: 1.31-strict/stable  # renovate: latest microk8s
+            microk8s-snap-channel: 1.32-strict/stable  # renovate: latest microk8s
     name: Integration test charm | ${{ matrix.juju.agent }} | ${{ matrix.cloud.substrate }}
     needs:
       - build
