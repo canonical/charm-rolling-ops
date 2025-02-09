@@ -18,7 +18,6 @@ jobs:
     runs-on: ubuntu-24.04
     needs:
       - ci-tests
-      - build
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,7 +33,6 @@ jobs:
     name: Release charm
     needs:
       - ci-tests
-      - build
     uses: canonical/data-platform-workflows/.github/workflows/release_charm.yaml@v29.1.0
     with:
       channel: latest/edge
