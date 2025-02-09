@@ -9,9 +9,13 @@ concurrency:
 on:
   pull_request:
   schedule:
-    - cron: '53 0 * * *' # Daily at 00:53 UTC
+    - cron: '53 0 * * *'  # Daily at 00:53 UTC
   # Triggered on push to branch "main" by .github/workflows/release.yaml
   workflow_call:
+    outputs:
+      artifact-prefix:
+        description: build_charm.yaml `artifact-prefix` output
+        value: ${{ jobs.build.outputs.artifact-prefix }}
 
 jobs:
   lint:
@@ -39,7 +43,7 @@ jobs:
       - unit-test
     uses: canonical/data-platform-workflows/.github/workflows/build_charm.yaml@v29.1.0
     with:
-      cache: true
+      cache: false  # TODO: remove after cache is enabled
 
   integration-test:
     strategy:
