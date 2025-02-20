@@ -42,16 +42,13 @@ jobs:
       - lint
       - unit-test
     uses: canonical/data-platform-workflows/.github/workflows/build_charm.yaml@v29.2.0
-    with:
-      cache: false  # TODO: remove after cache is enabled
 
   integration-test:
     strategy:
       fail-fast: false
       matrix:
         juju: 
-          - agent: 3.4.6  # renovate: juju-agent-pin-minor
-          - agent: 3.1.10  # renovate: juju-agent-pin-minor
+          - agent: 3.6.2  # renovate: juju-agent-pin-minor
           - agent: 2.9.51  # renovate: juju-agent-pin-minor
             libjuju: ^2
         cloud: 

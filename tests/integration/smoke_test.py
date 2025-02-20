@@ -196,7 +196,9 @@ async def test_on_delete(ops_test: OpsTest):
         logger.info(f"restart - {unit.name}")
         await unit.run_action("restart", delay=60)
 
-    await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
+    await model.block_until(
+        lambda: any(unit.workload_status == "maintenance" for unit in app.units), timeout=60
+    )
     assert app.status != "error"
 
     try:
