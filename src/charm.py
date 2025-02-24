@@ -19,10 +19,8 @@ import logging
 import time
 
 from charms.rolling_ops.v0.rollingops import RollingOpsManager
-from ops.charm import CharmBase
+from ops import ActiveStatus, CharmBase, main
 from ops.framework import StoredState
-from ops.main import main
-from ops.model import ActiveStatus
 
 logger = logging.getLogger(__name__)
 
