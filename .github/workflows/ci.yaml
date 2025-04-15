@@ -48,7 +48,7 @@ jobs:
       fail-fast: false
       matrix:
         juju: 
-          - agent: 3.6.4  # renovate: juju-agent-pin-minor
+          - agent: 3.6.5  # renovate: juju-agent-pin-minor
           - agent: 2.9.51  # renovate: juju-agent-pin-minor
             libjuju: ^2
         cloud: 
