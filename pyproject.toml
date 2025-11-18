@@ -15,7 +15,7 @@ ops = "^3.3.1"
 optional = true
 
 [tool.poetry.group.format.dependencies]
-ruff = "^0.14.4"
+ruff = "^0.14.5"
 
 [tool.poetry.group.lint]
 optional = true
@@ -25,11 +25,11 @@ codespell = "^2.4.1"
 
 [tool.poetry.group.unit.dependencies]
 coverage = {extras = ["toml"], version = "^7.11.3"}
-pytest = "^9.0.0"
+pytest = "^9.0.1"
 pytest-asyncio = "*"
 
 [tool.poetry.group.integration.dependencies]
-pytest = "^9.0.0"
+pytest = "^9.0.1"
 pytest-operator = "^0.43.2"
 pytest-operator-cache = {git = "https://github.com/canonical/data-platform-workflows", tag = "v37.0.0", subdirectory = "python/pytest_plugins/pytest_operator_cache"}
 pytest-operator-groups = {git = "https://github.com/canonical/data-platform-workflows", tag = "v37.0.0", subdirectory = "python/pytest_plugins/pytest_operator_groups"}
