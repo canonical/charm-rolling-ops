@@ -7,7 +7,7 @@ requires-poetry = ">=2.0.0"
 
 [tool.poetry.dependencies]
 python = "^3.10"
-ops = "^3.3.1"
+ops = "^3.4.0"
 
 [tool.poetry.group.charm-libs.dependencies]
 
@@ -15,7 +15,7 @@ ops = "^3.3.1"
 optional = true
 
 [tool.poetry.group.format.dependencies]
-ruff = "^0.14.5"
+ruff = "^0.14.7"
 
 [tool.poetry.group.lint]
 optional = true
@@ -24,7 +24,7 @@ optional = true
 codespell = "^2.4.1"
 
 [tool.poetry.group.unit.dependencies]
-coverage = {extras = ["toml"], version = "^7.11.3"}
+coverage = {extras = ["toml"], version = "^7.12.0"}
 pytest = "^9.0.1"
 pytest-asyncio = "*"
 
@@ -34,7 +34,7 @@ pytest-operator = "^0.43.2"
 pytest-operator-cache = {git = "https://github.com/canonical/data-platform-workflows", tag = "v40.0.0", subdirectory = "python/pytest_plugins/pytest_operator_cache"}
 pytest-operator-groups = {git = "https://github.com/canonical/data-platform-workflows", tag = "v40.0.0", subdirectory = "python/pytest_plugins/pytest_operator_groups"}
 juju = "^3.2.2"
-ops = "^3.3.1"
+ops = "^3.4.0"
 
 # Testing tools configuration
 [tool.coverage.run]
