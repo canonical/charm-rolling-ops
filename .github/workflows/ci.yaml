@@ -49,7 +49,7 @@ jobs:
       matrix:
         juju: 
           - agent: 3.6.12  # renovate: juju-agent-pin-minor
-          - agent: 2.9.52  # renovate: juju-agent-pin-minor
+          - agent: 2.9.53  # renovate: juju-agent-pin-minor
             libjuju: ^2
         cloud: 
           - substrate: lxd
