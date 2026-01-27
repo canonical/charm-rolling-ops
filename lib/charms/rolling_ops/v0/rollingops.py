@@ -378,9 +378,9 @@ class RollingOpsManager(Object):
             lock.acquire()
 
         if self.model.unit.is_leader():
-            self._on_process_locks()
+            self._on_process_locks(None)
 
-    def _on_process_locks(self):#, event: ProcessLocks):
+    def _on_process_locks(self, event: ProcessLocks):
         """Process locks.
 
         Runs only on the leader. Updates the status of all locks.
