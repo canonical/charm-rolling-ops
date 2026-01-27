@@ -392,7 +392,12 @@ class RollingOpsManager(Object):
         pending = []
 
         for lock in Locks(self):
-            logger.info(f"PROCESSING {lock.unit} {lock._state}")
+            unit_state = LockState(lock.relation.data[lock.unit].get("state", LockState.IDLE.value))
+            app_state = LockState(
+                lock.relation.data[lock.app].get(str(lock.unit), LockState.IDLE.value)
+            )
+            
+            logger.info(f"PROCESSING {lock.unit} unit={unit_state} app={app_state}")
             if lock.is_held():
                 # One of our units has the lock -- return without further processing.
                 return
