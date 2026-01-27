@@ -461,7 +461,7 @@ class RollingOpsManager(Object):
             callback(event)
         except DeferLock:
             lock.retry()
-            self.model.app.status = MaintenanceStatus("Rolling will be retried {}".format(self.name))
+            self.model.unit.status = MaintenanceStatus("Rolling will be retried {}".format(self.name))
             return
         lock.release()  # Updates relation data
         if lock.unit == self.model.unit:
