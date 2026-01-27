@@ -428,14 +428,14 @@ class RollingOpsManager(Object):
                 logger.info(f"RUNNING ON A RELEASED {event.callback_override}")
                 event.defer()
                 return
-            
+            relation = self.model.get_relation(self.name)
             if lock.is_retry():
                 logger.info(f"RUNNING ON A RETRIED {event.callback_override}")
                 relation.data[self.charm.unit].update({"callback_override": event.callback_override})
                 return
             lock.acquire()
             # emit relation changed event in the edge case where acquire does not
-            relation = self.model.get_relation(self.name)
+            
 
             # persist callback override for eventual run
             relation.data[self.charm.unit].update({"callback_override": event.callback_override})
