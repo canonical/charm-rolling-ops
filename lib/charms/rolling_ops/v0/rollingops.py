@@ -265,7 +265,7 @@ class Lock:
     
     def is_retry_released(self):
         """Is this unit waiting for a lock?"""
-        return self._state == LockState.RETRY
+        return self._state == LockState.RETRY_RELEASED
 
 
 class Locks:
