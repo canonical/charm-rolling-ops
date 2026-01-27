@@ -116,6 +116,7 @@ class LockState(Enum):
     GRANTED = "granted"
     IDLE = "idle"
     RETRY = "retry"
+    RETRY_RELEASED = "retry_released"
 
 
 class Lock:
@@ -191,6 +192,9 @@ class Lock:
         
         if app_state == LockState.GRANTED and unit_state == LockState.RETRY:
             return LockState.RETRY
+        
+        if app_state == LockState.IDLE and unit_state == LockState.RETRY:
+            return LockState.RETRY_RELEASED
 
         logger.debug("Lock state: %s %s", unit_state, app_state)
         return app_state  # Granted or unset/released
@@ -209,7 +213,7 @@ class Lock:
         
         if state == LockState.RETRY:
             self.relation.data[self.unit].update({"state": state.value})
-
+        
         if state == LockState.GRANTED:
             self.relation.data[self.app].update({str(self.unit): state.value})
 
@@ -256,6 +260,10 @@ class Lock:
         return self._state == LockState.ACQUIRE
     
     def is_retry(self):
+        """Is this unit waiting for a lock?"""
+        return self._state == LockState.RETRY
+    
+    def is_retry_released(self):
         """Is this unit waiting for a lock?"""
         return self._state == LockState.RETRY
 
@@ -365,6 +373,9 @@ class RollingOpsManager(Object):
 
         if lock.is_held():
             self.charm.on[self.name].run_with_lock.emit()
+            
+        if lock.is_retry_released():
+            lock.acquire()
 
         if self.model.unit.is_leader():
             self.charm.on[self.name].process_locks.emit()
@@ -389,7 +400,7 @@ class RollingOpsManager(Object):
             if lock.release_requested() or lock.is_retry():
                 lock.clear()  # Updates relation data
 
-            if lock.is_pending() or lock.is_retry():
+            if lock.is_pending():
                 if lock.unit == self.model.unit:
                     # Always run on the leader last.
                     pending.insert(0, lock)
@@ -450,6 +461,7 @@ class RollingOpsManager(Object):
             callback(event)
         except DeferLock:
             lock.retry()
+            self.model.app.status = MaintenanceStatus("Rolling will be retried {}".format(self.name))
             return
         lock.release()  # Updates relation data
         if lock.unit == self.model.unit:
