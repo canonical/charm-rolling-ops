@@ -18,7 +18,7 @@
 import logging
 import time
 
-from charms.rolling_ops.v0.rollingops import RollingOpsManager
+from charms.rolling_ops.v0.rollingops import RollingOpsManager, DeferLock
 from ops import ActiveStatus, CharmBase, main
 from ops.framework import StoredState
 
@@ -56,6 +56,7 @@ class CharmRollingOpsCharm(CharmBase):
         self.model.get_relation(self.restart_manager.name).data[self.unit].update({
             "restart-type": "restart"
         })
+        
 
     def _custom_restart(self, event):
         if self._stored.delay:
@@ -64,6 +65,7 @@ class CharmRollingOpsCharm(CharmBase):
         self.model.get_relation(self.restart_manager.name).data[self.unit].update({
             "restart-type": "custom-restart"
         })
+        raise DeferLock()
 
     def _on_install(self, event):
         self.unit.status = ActiveStatus()

@@ -98,6 +98,12 @@ class LockNoRelationError(Exception):
     pass
 
 
+class DeferLock(Exception):
+    """Raised if we are trying to process a lock, but do not appear to have a relation yet."""
+
+    pass
+
+
 class LockState(Enum):
     """Possible states for our Distributed lock.
 
@@ -109,6 +115,7 @@ class LockState(Enum):
     RELEASE = "release"
     GRANTED = "granted"
     IDLE = "idle"
+    RETRY = "retry"
 
 
 class Lock:
@@ -181,6 +188,9 @@ class Lock:
         if app_state == LockState.IDLE and unit_state == LockState.ACQUIRE:
             # Active acquire request.
             return LockState.ACQUIRE
+        
+        if app_state == LockState.GRANTED and unit_state == LockState.RETRY:
+            return LockState.RETRY
 
         logger.debug("Lock state: %s %s", unit_state, app_state)
         return app_state  # Granted or unset/released
@@ -195,6 +205,9 @@ class Lock:
             self.relation.data[self.unit].update({"state": state.value})
 
         if state == LockState.RELEASE:
+            self.relation.data[self.unit].update({"state": state.value})
+        
+        if state == LockState.RETRY:
             self.relation.data[self.unit].update({"state": state.value})
 
         if state == LockState.GRANTED:
@@ -224,6 +237,17 @@ class Lock:
         """Grant a lock to a unit."""
         self._state = LockState.GRANTED
         logger.debug("Lock granted.")
+    
+    def retry(self):
+        """Grant a lock to a unit."""
+        self._state = LockState.RETRY
+        logger.debug("Lock retried.")
+        
+    def restart(self):
+        """Grant a lock to a unit."""
+        self._state = LockState.IDLE
+        self._state = LockState.ACQUIRE
+        logger.debug("Lock restarted.")
 
     def is_held(self):
         """This unit holds the lock."""
@@ -236,6 +260,10 @@ class Lock:
     def is_pending(self):
         """Is this unit waiting for a lock?"""
         return self._state == LockState.ACQUIRE
+    
+    def is_retry(self):
+        """Is this unit waiting for a lock?"""
+        return self._state == LockState.RETRY
 
 
 class Locks:
@@ -365,6 +393,9 @@ class RollingOpsManager(Object):
 
             if lock.release_requested():
                 lock.clear()  # Updates relation data
+                
+            if lock.is_retry():
+                lock.restart()
 
             if lock.is_pending():
                 if lock.unit == self.model.unit:
@@ -390,7 +421,12 @@ class RollingOpsManager(Object):
     def _on_acquire_lock(self: CharmBase, event: ActionEvent):
         """Request a lock."""
         try:
-            Lock(self).acquire()  # Updates relation data
+            lock = Lock(self).acquire()  # Updates relation data
+            if lock.release_requested() or lock.is_retry():
+                logger.info(f"RUNNING ON A RELEASED/RETRIED {event.callback_override}")
+                event.defer()
+                return
+
             # emit relation changed event in the edge case where acquire does not
             relation = self.model.get_relation(self.name)
 
@@ -412,8 +448,11 @@ class RollingOpsManager(Object):
             "callback_override", self._callback.__name__
         )
         callback = getattr(self.charm, callback_name)
-        callback(event)
-
+        try:
+            callback(event)
+        except DeferLock:
+            lock.retry()
+            return
         lock.release()  # Updates relation data
         if lock.unit == self.model.unit:
             self.charm.on[self.name].process_locks.emit()
