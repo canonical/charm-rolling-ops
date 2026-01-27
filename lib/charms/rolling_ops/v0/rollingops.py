@@ -242,12 +242,6 @@ class Lock:
         """Grant a lock to a unit."""
         self._state = LockState.RETRY
         logger.debug("Lock retried.")
-        
-    def restart(self):
-        """Grant a lock to a unit."""
-        self._state = LockState.IDLE
-        self._state = LockState.ACQUIRE
-        logger.debug("Lock restarted.")
 
     def is_held(self):
         """This unit holds the lock."""
@@ -392,13 +386,10 @@ class RollingOpsManager(Object):
                 # One of our units has the lock -- return without further processing.
                 return
 
-            if lock.release_requested():
+            if lock.release_requested() or lock.is_retry():
                 lock.clear()  # Updates relation data
-                
-            if lock.is_retry():
-                lock.restart()
 
-            if lock.is_pending():
+            if lock.is_pending() or lock.is_retry():
                 if lock.unit == self.model.unit:
                     # Always run on the leader last.
                     pending.insert(0, lock)
