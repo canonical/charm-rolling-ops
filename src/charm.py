@@ -49,6 +49,7 @@ class CharmRollingOpsCharm(CharmBase):
         # In a production charm, we'd perhaps import the systemd library, and run
         # systemd.restart_service.  Here, we just set a sentinel in our stored state, so
         # that we can run our tests.
+        logger.info("RUNNING RESTART")
         if self._stored.delay:
             time.sleep(int(self._stored.delay))
         self._stored.restarted = True
@@ -59,6 +60,7 @@ class CharmRollingOpsCharm(CharmBase):
         
 
     def _custom_restart(self, event):
+        logger.info("RUNNING CUSTOM RESTART")
         if self._stored.delay:
             time.sleep(int(self._stored.delay))
 
