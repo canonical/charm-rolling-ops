@@ -341,13 +341,13 @@ class RollingOpsManager(Object):
 
         charm.on.define_event("{}_run_with_lock".format(self.name), RunWithLock)
         charm.on.define_event("{}_acquire_lock".format(self.name), AcquireLock)
-        charm.on.define_event("{}_process_locks".format(self.name), ProcessLocks)
+        #charm.on.define_event("{}_process_locks".format(self.name), ProcessLocks)
 
         # Watch those events (plus the built in relation event).
         self.framework.observe(charm.on[self.name].relation_changed, self._on_relation_changed)
         self.framework.observe(charm.on[self.name].acquire_lock, self._on_acquire_lock)
         self.framework.observe(charm.on[self.name].run_with_lock, self._on_run_with_lock)
-        self.framework.observe(charm.on[self.name].process_locks, self._on_process_locks)
+        #self.framework.observe(charm.on[self.name].process_locks, self._on_process_locks)
         self.framework.observe(charm.on.leader_elected, self._on_process_locks)
 
     def _callback(self: CharmBase, event: EventBase) -> None:
@@ -378,9 +378,9 @@ class RollingOpsManager(Object):
             lock.acquire()
 
         if self.model.unit.is_leader():
-            self.charm.on[self.name].process_locks.emit()
+            self._on_process_locks()
 
-    def _on_process_locks(self: CharmBase, event: ProcessLocks):
+    def _on_process_locks(self):#, event: ProcessLocks):
         """Process locks.
 
         Runs only on the leader. Updates the status of all locks.
@@ -420,6 +420,8 @@ class RollingOpsManager(Object):
 
         if self.model.app.status.message == f"Beginning rolling {self.name}":
             self.model.app.status = ActiveStatus()
+            
+    
 
     def _on_acquire_lock(self: CharmBase, event: ActionEvent):
         """Request a lock."""
@@ -464,8 +466,8 @@ class RollingOpsManager(Object):
             self.model.unit.status = MaintenanceStatus("Rolling will be retried {}".format(self.name))
             return
         lock.release()  # Updates relation data
-        if lock.unit == self.model.unit:
-            self.charm.on[self.name].process_locks.emit()
+        #if lock.unit == self.model.unit:
+        #    self.charm.on[self.name].process_locks.emit()
 
         # cleanup old callback overrides
         relation.data[self.charm.unit].update({"callback_override": ""})
