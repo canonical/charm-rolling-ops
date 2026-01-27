@@ -420,7 +420,8 @@ class RollingOpsManager(Object):
             lock.grant()
             if lock.unit == self.model.unit:
                 # It's time for the leader to run with lock.
-                self.charm.on[self.name].run_with_lock.emit()
+                self._on_run_with_lock(None)
+                #self.charm.on[self.name].run_with_lock.emit()
             return
 
         if self.model.app.status.message == f"Beginning rolling {self.name}":
