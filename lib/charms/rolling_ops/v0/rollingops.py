@@ -422,12 +422,13 @@ class RollingOpsManager(Object):
     def _on_acquire_lock(self: CharmBase, event: ActionEvent):
         """Request a lock."""
         try:
-            lock = Lock(self).acquire()  # Updates relation data
+            lock = Lock(self)  # Updates relation data
+            
             if lock.release_requested() or lock.is_retry():
                 logger.info(f"RUNNING ON A RELEASED/RETRIED {event.callback_override}")
                 event.defer()
                 return
-
+            lock.acquire()
             # emit relation changed event in the edge case where acquire does not
             relation = self.model.get_relation(self.name)
 
