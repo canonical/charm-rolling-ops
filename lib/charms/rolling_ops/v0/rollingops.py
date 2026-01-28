@@ -349,6 +349,18 @@ class RollingOpsManager(Object):
         self.framework.observe(charm.on[self.name].run_with_lock, self._on_run_with_lock)
         #self.framework.observe(charm.on[self.name].process_locks, self._on_process_locks)
         self.framework.observe(charm.on.leader_elected, self._on_process_locks)
+        self.framework.observe(charm.on.collect_status, self._on_collect_status)
+        self.framework.observe(charm.on.update_status, self._on_collect_status)
+        
+    def _on_collect_status(self, event):
+        if not self.model.unit.is_leader():
+            return
+        
+        self._on_process_locks(None)
+        
+        lock = Lock(self)
+        if lock.is_held():
+            self._on_run_with_lock(None)
 
     def _callback(self: CharmBase, event: EventBase) -> None:
         """Placeholder for the function that actually runs our event.
@@ -405,7 +417,7 @@ class RollingOpsManager(Object):
             if lock.release_requested() or lock.is_retry():
                 lock.clear()  # Updates relation data
 
-            if lock.is_pending():
+            if lock.is_pending() or (lock.is_retry_released() and lock.unit == self.model.unit):
                 if lock.unit == self.model.unit:
                     # Always run on the leader last.
                     pending.insert(0, lock)
@@ -417,12 +429,18 @@ class RollingOpsManager(Object):
         if pending:
             self.model.app.status = MaintenanceStatus("Beginning rolling {}".format(self.name))
             lock = pending[-1]
-            lock.grant()
-            if lock.unit == self.model.unit:
+            
+            if lock.unit == self.model.unit: # leader
+                
+                if lock.is_retry_released():
+                    lock.acquire()
+                    lock.grant()
+                    return
                 # It's time for the leader to run with lock.
                 self._on_run_with_lock(None)
                 #self.charm.on[self.name].run_with_lock.emit()
-            return
+                return
+            lock.grant()
 
         if self.model.app.status.message == f"Beginning rolling {self.name}":
             self.model.app.status = ActiveStatus()
@@ -449,7 +467,8 @@ class RollingOpsManager(Object):
 
             # persist callback override for eventual run
             relation.data[self.charm.unit].update({"callback_override": event.callback_override})
-            self.charm.on[self.name].relation_changed.emit(relation, app=self.charm.app)
+            if self.model.unit.is_leader():
+                self.charm.on[self.name].relation_changed.emit(relation, app=self.charm.app)
 
         except LockNoRelationError:
             logger.debug("No {} peer relation yet. Delaying rolling op.".format(self.name))
@@ -459,7 +478,7 @@ class RollingOpsManager(Object):
         lock = Lock(self)
         self.model.unit.status = MaintenanceStatus("Executing {} operation".format(self.name))
         relation = self.model.get_relation(self.name)
-
+        
         # default to instance callback if not set
         callback_name = relation.data[self.charm.unit].get(
             "callback_override", self._callback.__name__
@@ -470,6 +489,8 @@ class RollingOpsManager(Object):
         except DeferLock:
             lock.retry()
             self.model.unit.status = MaintenanceStatus("Rolling will be retried {}".format(self.name))
+            if self.model.unit.is_leader():
+                lock.clear()
             return
         lock.release()  # Updates relation data
         #if lock.unit == self.model.unit:
