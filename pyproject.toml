@@ -7,7 +7,7 @@ requires-poetry = ">=2.0.0"
 
 [tool.poetry.dependencies]
 python = "^3.10"
-ops = "^3.5.0"
+ops = "^3.5.1"
 
 [tool.poetry.group.charm-libs.dependencies]
 
@@ -34,7 +34,7 @@ pytest-operator = "^0.43.2"
 pytest-operator-cache = {git = "https://github.com/canonical/data-platform-workflows", tag = "v41.1.0", subdirectory = "python/pytest_plugins/pytest_operator_cache"}
 pytest-operator-groups = {git = "https://github.com/canonical/data-platform-workflows", tag = "v41.1.0", subdirectory = "python/pytest_plugins/pytest_operator_groups"}
 juju = "^3.2.2"
-ops = "^3.5.0"
+ops = "^3.5.1"
 
 # Testing tools configuration
 [tool.coverage.run]
