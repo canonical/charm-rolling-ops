@@ -70,6 +70,7 @@ operation without restarting workloads that were able to successfully restart --
 omit the successful units from a subsequent run-action call.)
 
 """
+import time
 
 import logging
 from enum import Enum
@@ -286,6 +287,9 @@ class ProcessLocks(EventBase):
 
     pass
 
+class PattyEmittedEvent(EventBase):
+    """Custom event emitted when the background worker grants the lock."""
+
 
 class RollingOpsManager(Object):
     """Emitters and handlers for rolling ops."""
@@ -319,6 +323,13 @@ class RollingOpsManager(Object):
         self.framework.observe(charm.on[self.name].run_with_lock, self._on_run_with_lock)
         self.framework.observe(charm.on[self.name].process_locks, self._on_process_locks)
         self.framework.observe(charm.on.leader_elected, self._on_process_locks)
+        self.framework.observe(charm.on[self.name].patty_emitted, self._on_patty_emitted)
+
+    def _on_patty_emitted(self, event):
+        logger.info("Patty emitted event")
+        if self._stored.delay:
+            time.sleep(int(self._stored.delay))
+        logger.info("Patty emitted done")
 
     def _callback(self: CharmBase, event: EventBase) -> None:
         """Placeholder for the function that actually runs our event.
