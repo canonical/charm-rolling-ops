@@ -12,10 +12,12 @@ jobs:
     name: Tests
     uses: ./.github/workflows/ci.yaml
     secrets: inherit
+    permissions: {}
 
   release-libs:
     name: Release bumped library
     runs-on: ubuntu-24.04
+    permissions: {}
     needs:
       - ci-tests
     steps:

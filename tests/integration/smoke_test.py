@@ -26,6 +26,8 @@ from juju.model import JujuAPIError, Model
 from juju.unit import Unit
 from pytest_operator.plugin import OpsTest
 
+from . import architecture
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,7 +60,7 @@ async def test_smoke(ops_test: OpsTest):
     model_full_name: str = ops_test.model_full_name
 
     # Deploy, and verify deployment
-    charm = await ops_test.build_charm(".")
+    charm = f"./rolling-ops_ubuntu@22.04-{architecture.architecture}.charm"
     await asyncio.gather(ops_test.model.deploy(charm, application_name="rolling-ops", num_units=3))
 
     # to spare the typechecker errors
