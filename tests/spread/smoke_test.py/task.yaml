@@ -1,0 +1,5 @@
+summary: smoke_test.py
+environment:
+  TEST_MODULE: smoke_test.py
+execute: |
+  tox run -e integration -- "tests/integration/$TEST_MODULE" --controller "$CONTROLLER_NAME" --model testing
