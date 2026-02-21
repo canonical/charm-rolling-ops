@@ -47,7 +47,6 @@ def get_restart_type(unit: Unit, model_name: str) -> str:
 
 
 @pytest.mark.abort_on_fail
-@pytest.mark.group(1)
 async def test_smoke(ops_test: OpsTest):
     """Basic smoke test following the default callback implementation.
 
@@ -91,7 +90,6 @@ async def test_smoke(ops_test: OpsTest):
 
 
 @pytest.mark.abort_on_fail
-@pytest.mark.group(1)
 async def test_smoke_single_unit(ops_test):
     """Basic smoke test, on a single unit.
 
@@ -137,7 +135,6 @@ async def test_smoke_single_unit(ops_test):
 
 
 @pytest.mark.abort_on_fail
-@pytest.mark.group(1)
 async def test_scale_up(ops_test: OpsTest):
     """Scale the application back up, restart again."""
     # to spare the typechecker errors
@@ -177,7 +174,6 @@ async def test_scale_up(ops_test: OpsTest):
 
 
 @pytest.mark.abort_on_fail
-@pytest.mark.group(1)
 async def test_on_delete(ops_test: OpsTest):
     """Basic restart followed by premature app deletion.
 
