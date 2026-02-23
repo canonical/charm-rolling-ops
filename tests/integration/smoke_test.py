@@ -26,6 +26,8 @@ from juju.model import JujuAPIError, Model
 from juju.unit import Unit
 from pytest_operator.plugin import OpsTest
 
+from . import architecture
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,7 +47,6 @@ def get_restart_type(unit: Unit, model_name: str) -> str:
 
 
 @pytest.mark.abort_on_fail
-@pytest.mark.group(1)
 async def test_smoke(ops_test: OpsTest):
     """Basic smoke test following the default callback implementation.
 
@@ -58,7 +59,7 @@ async def test_smoke(ops_test: OpsTest):
     model_full_name: str = ops_test.model_full_name
 
     # Deploy, and verify deployment
-    charm = await ops_test.build_charm(".")
+    charm = f"./rolling-ops_ubuntu@22.04-{architecture.architecture}.charm"
     await asyncio.gather(ops_test.model.deploy(charm, application_name="rolling-ops", num_units=3))
 
     # to spare the typechecker errors
@@ -89,7 +90,6 @@ async def test_smoke(ops_test: OpsTest):
 
 
 @pytest.mark.abort_on_fail
-@pytest.mark.group(1)
 async def test_smoke_single_unit(ops_test):
     """Basic smoke test, on a single unit.
 
@@ -135,7 +135,6 @@ async def test_smoke_single_unit(ops_test):
 
 
 @pytest.mark.abort_on_fail
-@pytest.mark.group(1)
 async def test_scale_up(ops_test: OpsTest):
     """Scale the application back up, restart again."""
     # to spare the typechecker errors
@@ -175,7 +174,6 @@ async def test_scale_up(ops_test: OpsTest):
 
 
 @pytest.mark.abort_on_fail
-@pytest.mark.group(1)
 async def test_on_delete(ops_test: OpsTest):
     """Basic restart followed by premature app deletion.
 

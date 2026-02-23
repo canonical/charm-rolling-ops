@@ -17,10 +17,11 @@ on:
         description: build_charm.yaml `artifact-prefix` output
         value: ${{ jobs.build.outputs.artifact-prefix }}
 
+permissions: {}
 jobs:
   lint:
     name: Lint
-    uses: canonical/data-platform-workflows/.github/workflows/lint.yaml@v41.1.2
+    uses: canonical/data-platform-workflows/.github/workflows/lint.yaml@v42.0.0
 
   unit-test:
     name: Unit test charm
@@ -41,27 +42,13 @@ jobs:
     needs:
       - lint
       - unit-test
-    uses: canonical/data-platform-workflows/.github/workflows/build_charm.yaml@v41.1.2
+    uses: canonical/data-platform-workflows/.github/workflows/build_charm.yaml@v42.0.0
 
   integration-test:
-    strategy:
-      fail-fast: false
-      matrix:
-        juju: 
-          - agent: 3.6.14  # renovate: juju-agent-pin-minor
-          - agent: 2.9.53  # renovate: juju-agent-pin-minor
-            libjuju: ^2
-        cloud: 
-          - substrate: lxd
-          - substrate: microk8s
-            microk8s-snap-channel: 1.35-strict/stable  # renovate: latest microk8s
-    name: Integration test charm | ${{ matrix.juju.agent }} | ${{ matrix.cloud.substrate }}
+    name: Integration test charm
     needs:
+      - lint
       - build
-    uses: canonical/data-platform-workflows/.github/workflows/integration_test_charm.yaml@v41.1.2
+    uses: ./.github/workflows/integration_test.yaml
     with:
       artifact-prefix: ${{ needs.build.outputs.artifact-prefix }}
-      cloud: ${{ matrix.cloud.substrate }}
-      microk8s-snap-channel: ${{ matrix.cloud.microk8s-snap-channel }}
-      juju-agent-version: ${{ matrix.juju.agent }}
-      libjuju-version-constraint: ${{ matrix.juju.libjuju }}
