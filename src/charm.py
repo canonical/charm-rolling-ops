@@ -29,8 +29,6 @@ logger = logging.getLogger(__name__)
 class CharmRollingOpsCharm(CharmBase):
     """Charm the service."""
 
-    _stored = StoredState()
-
     def __init__(self, *args):
         super().__init__(*args)
 
@@ -49,8 +47,6 @@ class CharmRollingOpsCharm(CharmBase):
         self.framework.observe(self.on.failed_restart_action, self._on_failed_restart_action)
         self.framework.observe(self.on.deferred_restart_action, self._on_deferred_restart_action)
 
-        self._stored.set_default(deferred=0)
-
     def _restart(self, delay: int = 0):
         # In a production charm, we'd perhaps import the systemd library, and run
         # systemd.restart_service.  Here, we just set a sentinel in our stored state, so
@@ -68,7 +64,7 @@ class CharmRollingOpsCharm(CharmBase):
         return OperationResult.RETRY_RELEASE
 
     def _deferred_restart(self, delay: int = 0):
-        logger.info(f"Starting deferred restart operation {self._stored.deferred}")
+        logger.info(f"Starting deferred restart operation")
         self.model.unit.status = MaintenanceStatus("Executing _deferred_restart operation")
         time.sleep(int(delay))
         self.model.unit.status = MaintenanceStatus("Rolling restart operation failed")
