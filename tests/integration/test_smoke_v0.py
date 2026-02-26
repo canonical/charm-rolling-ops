@@ -17,6 +17,7 @@
 import asyncio
 import json
 import logging
+import shutil
 import subprocess
 
 import pytest
@@ -44,6 +45,14 @@ def get_restart_type(unit: Unit, model_name: str) -> str:
     return restart_type
 
 
+@pytest.fixture(scope="module", autouse=True)
+def copy_rolling_ops_library_into_charm(ops_test: OpsTest):
+    """Copy the data_interfaces library to the different charm folder."""
+    library_path = "lib/charms/rolling_ops/v0/rollingops.py"
+    install_path = "tests/charms/v0/" + library_path
+    shutil.copyfile(library_path, install_path)
+
+
 @pytest.mark.abort_on_fail
 @pytest.mark.group(1)
 async def test_smoke(ops_test: OpsTest):
@@ -58,7 +67,7 @@ async def test_smoke(ops_test: OpsTest):
     model_full_name: str = ops_test.model_full_name
 
     # Deploy, and verify deployment
-    charm = await ops_test.build_charm(".")
+    charm = await ops_test.build_charm("tests/charms/v0")
     await asyncio.gather(ops_test.model.deploy(charm, application_name="rolling-ops", num_units=3))
 
     # to spare the typechecker errors
