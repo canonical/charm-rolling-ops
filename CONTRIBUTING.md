@@ -14,15 +14,15 @@ source .tox/unit/bin/activate
 
 ### v1
 
-The rolling ops library v1 lives in [./lib/charms/rolling_ops/v1/rollingops.py](./lib/charms/rolling_ops/v1/rollingops.py).
+The rolling ops library v1 lives in [lib/charms/rolling_ops/v1/rollingops.py](https://github.com/canonical/charm-rolling-ops/blob/main/lib/charms/rolling_ops/v1/rollingops.py).
 
-The example charm lives in [./src/charm.py](./src/charm.py).
+The example charm lives in [src/charm.py](https://github.com/canonical/charm-rolling-ops/blob/main/src/charm.py).
 
 ### v0
 
-The rolling ops library v0 lives in [./lib/charms/rolling_ops/v0/rollingops.py](./lib/charms/rolling_ops/v0/rollingops.py).
+The rolling ops library v0 lives in [lib/charms/rolling_ops/v0/rollingops.py](https://github.com/canonical/charm-rolling-ops/blob/main/lib/charms/rolling_ops/v0/rollingops.py).
 
-The example charm lives in [./tests/charms/v0/src/charm.py](./tests/charms/v0/src/charm.py).
+The example charm lives in [tests/charms/v0/src/charm.py](https://github.com/canonical/charm-rolling-ops/blob/main/tests/charms/v0/src/charm.py).
 
 ## Intended use case
 
@@ -43,7 +43,8 @@ sure additionally run `tox -e integration`. This will run a separate
 set of tests against a live environment. Note that `juju` must be
 installed, and a bare metal or vm controller must be bootstrapped.
 
-Manual tests may be run by following the instructions in [./tests/QA.md](./tests/QA.md).
+Manual tests may be run by following the instructions in 
+[tests/QA.md](https://github.com/canonical/charm-rolling-ops/blob/main/tests/QA.md).
 
 Run unit tests
 ```

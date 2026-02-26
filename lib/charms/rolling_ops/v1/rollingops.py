@@ -57,17 +57,13 @@ Keys:
 
 ## Retry semantics
 
-- If a callback returns `OperationResult.RETRY` or raises an exception, the operation
-  is retried according to its retry policy.
+- If a callback returns `OperationResult.RETRY_RELEASE` the unit will release the
+lock and retry the operation later.
+- If a callback return `OperationResult.RETRY_HOLD` the unit will keep the
+lock and retry inmediately.
 - Retry state (`attempt`) is tracked per operation.
 - When `max_retry` is exceeded, the failing operation is dropped and the unit
   proceeds to the next queued operation, if any.
-
-## Deferral semantics
-
-If the unit wants to retry the operation but keep the lock it should defer the
-RunWithLock event. It would be the responsibility of the charm author to make sure
-there are other events triggered on the charm so that the deferred event can be called.
 
 ## Scheduling semantics
 
@@ -96,7 +92,7 @@ a unit holds the distributed lock:
 
 src/charm.py
 ```python
-from charms.rolling_ops.v1.rollingops import RollingOpsManagerv1, OperationResult, RunWithLock
+from charms.rolling_ops.v1.rollingops import RollingOpsManagerv1, OperationResult
 
 class SomeCharm(CharmBase):
     def __init__(self, *args):
@@ -112,20 +108,20 @@ class SomeCharm(CharmBase):
             },
         )
 
-    def _restart(self, event: RunWithLock, force: bool) -> OperationResult:
+    def _restart(self, force: bool) -> OperationResult:
         # perform restart logic
-        return OperationResult.COMPLETED
+        return OperationResult.RELEASE
 
-    def _failed_restart(self, event: RunWithLock) -> OperationResult:
+    def _failed_restart(self) -> OperationResult:
         # perform restart logic
-        return OperationResult.RETRY
+        return OperationResult.RETRY_RELEASE
 
-    def _defer_restart(self, event: RunWithLock) -> OperationResult:
+    def _defer_restart(self) -> OperationResult:
         if not self.ready():
             event.defer()
-            return OperationResult.RETRY
+            return OperationResult.RETRY_HOLD
         # do restart logic
-        return OperationResult.COMPLETED
+        return OperationResult.RELEASE
 ```
 
 Request a rolling operation
@@ -385,15 +381,17 @@ class LockIntent(Enum):
     """Unit-level lock intents stored in unit databags."""
 
     REQUEST = "request"
-    RETRY = "retry"
+    RETRY_RELEASE = "retry-release"
+    RETRY_HOLD = "retry-hold"
     IDLE = "idle"
 
 
 class OperationResult(Enum):
     """Callback return values."""
 
-    COMPLETED = "completed"
-    RETRY = "retry"
+    RELEASE = "release"
+    RETRY_RELEASE = "retry-release"
+    RETRY_HOLD = "retry-hold"
 
 
 class Lock:
@@ -446,7 +444,7 @@ class Lock:
             logger.info("Operation %s not added to queue.")
         self._unit_data.update({"operations": queue.to_string()})
 
-    def retry(self):
+    def _set_retry(self, intent: LockIntent):
         """Mark retry for the head operation.
 
         If max_retry is reached, the head operation is dropped via complete().
@@ -458,8 +456,22 @@ class Lock:
             return
         self._unit_data.update({
             "executed_at": _now_timestamp_str(),
-            "state": LockIntent.RETRY.value,
+            "state": intent.value,
         })
+
+    def retry_release(self):
+        """Mark retry for the head operation.
+
+        If max_retry is reached, the head operation is dropped via complete().
+        """
+        self._set_retry(LockIntent.RETRY_RELEASE)
+
+    def retry_hold(self):
+        """Mark retry for the head operation.
+
+        If max_retry is reached, the head operation is dropped via complete().
+        """
+        self._set_retry(LockIntent.RETRY_HOLD)
 
     def complete(self):
         """Mark the head operation as completed successfully, pop it from the queue.
@@ -513,12 +525,20 @@ class Lock:
     def is_retry(self) -> bool:
         """Return True if this unit requested retry but still has the grant (leader should clear)."""
         unit_intent = self._unit_data.get("state")
-        return unit_intent == LockIntent.RETRY.value and self.is_granted()
+        return (
+            unit_intent == LockIntent.RETRY_RELEASE.value
+            or unit_intent == LockIntent.RETRY_HOLD.value
+        ) and self.is_granted()
 
     def is_waiting_retry(self) -> bool:
         """Return True if the unit requested retry and is waiting for lock to be granted."""
         unit_intent = self._unit_data.get("state")
-        return unit_intent == LockIntent.RETRY.value and not self.is_granted()
+        return unit_intent == LockIntent.RETRY_RELEASE.value and not self.is_granted()
+
+    def is_retry_hold(self) -> bool:
+        """Return True if the unit requested retry and is waiting for lock to be granted."""
+        unit_intent = self._unit_data.get("state")
+        return unit_intent == LockIntent.RETRY_HOLD.value and not self.is_granted()
 
     def get_current_operation(self) -> Operation | None:
         """Return the head operation for this unit, if any."""
@@ -579,32 +599,6 @@ class Locks:
             yield Lock(self._manager, unit=unit)
 
 
-class AcquireLock(EventBase):
-    """Signals that this unit wants to acquire a lock."""
-
-    def __init__(
-        self, handle, callback_id: str, kwargs: dict[str, Any] = {}, max_retry: int | None = None
-    ):
-        super().__init__(handle)
-        self.callback_id = callback_id
-        self.kwargs = kwargs
-        self.max_retry = max_retry
-
-    def snapshot(self):
-        """Snapshot of lock event."""
-        return {
-            "callback_id": self.callback_id,
-            "kwargs": self.kwargs,
-            "max_retry": self.max_retry,
-        }
-
-    def restore(self, snapshot):
-        """Restores lock event."""
-        self.callback_id = snapshot["callback_id"]
-        self.kwargs = snapshot["kwargs"]
-        self.max_retry = snapshot["max_retry"]
-
-
 def pick_oldest_completed(locks: list[Lock]) -> Optional[Lock]:
     """Choose the retry lock with the oldest executed_at timestamp."""
     selected = None
@@ -643,14 +637,6 @@ class RollingOpsLockGrantedEvent(EventBase):
     """Custom event emitted when the background worker grants the lock."""
 
 
-class RunWithLock(EventBase):
-    """Event to signal that this unit should run the callback."""
-
-
-class ProcessLocks(EventBase):
-    """Used to tell the leader to process all locks."""
-
-
 class RollingOpsManagerV1(Object):
     """Emitters and handlers for rolling ops."""
 
@@ -670,7 +656,6 @@ class RollingOpsManagerV1(Object):
         self.worker = RollingOpsAsyncWorker(charm, relation_name=relation_name)
 
         charm.on.define_event("rollingop_lock_granted", RollingOpsLockGrantedEvent)
-        charm.on.define_event("{}_run_with_lock".format(self.relation_name), RunWithLock)
 
         self.framework.observe(
             charm.on[self.relation_name].relation_changed, self._on_relation_changed
@@ -681,7 +666,6 @@ class RollingOpsManagerV1(Object):
         self.framework.observe(charm.on.leader_elected, self._process_locks)
         self.framework.observe(charm.on.rollingop_lock_granted, self._on_rollingop_granted)
         self.framework.observe(charm.on.update_status, self._on_rollingop_granted)
-        self.framework.observe(charm.on[self.relation_name].run_with_lock, self._on_run_with_lock)
 
     @property
     def _relation(self) -> Relation | None:
@@ -693,7 +677,7 @@ class RollingOpsManagerV1(Object):
         logger.info("Received a rolling-op lock granted event.")
         lock = Lock(self)
         if lock.should_run():
-            self._charm.on[self.relation_name].run_with_lock.emit()
+            self._on_run_with_lock()
 
     def _on_relation_departed(self, event: RelationDepartedEvent) -> None:
         """Leader cleanup: if a departing unit was granted, clear the grant.
@@ -716,7 +700,7 @@ class RollingOpsManagerV1(Object):
 
         lock = Lock(self)
         if lock.should_run():
-            self._charm.on[self.relation_name].run_with_lock.emit()
+            self._on_run_with_lock()
 
     def _valid_peer_unit_names(self) -> set[str]:
         """Return all unit names currently participating in the peer relation."""
@@ -769,6 +753,9 @@ class RollingOpsManagerV1(Object):
         pending_retries = []
 
         for lock in Locks(self):
+            if lock.is_retry_hold():
+                self._grant_lock(lock)
+                return
             if lock.is_waiting():
                 pending_requests.append(lock)
 
@@ -785,13 +772,16 @@ class RollingOpsManagerV1(Object):
             logger.info("No pending lock requests. Lock was not granted to any unit.")
             return
 
+        self._grant_lock(selected)
+
+    def _grant_lock(self, selected: Lock):
         selected.grant()
         logger.info("Lock granted to unit=%s.", selected.unit.name)
         if selected.unit == self.model.unit:
-            if lock.is_retry():
+            if selected.is_retry():
                 self.worker.start()
                 return
-            self._charm.on[self.relation_name].run_with_lock.emit()
+            self._on_run_with_lock()
 
     def request_async_lock(
         self,
@@ -839,7 +829,7 @@ class RollingOpsManagerV1(Object):
             )
             raise e
 
-    def _on_run_with_lock(self, event: RunWithLock):
+    def _on_run_with_lock(self):
         """Execute the current head operation if this unit holds the distributed lock.
 
         - If this unit does not currently hold the lock grant, no operation is run.
@@ -864,18 +854,20 @@ class RollingOpsManagerV1(Object):
             )
 
             try:
-                result = callback(event, **operation.kwargs)
+                result = callback(**operation.kwargs)
             except Exception as e:
                 logger.error("Operation failed: %s: %s", operation.callback_id, e)
-                result = OperationResult.RETRY
+                result = OperationResult.RETRY_RELEASE
 
-            if event.deferred:
-                logger.info("Execution of %s was deferred.", operation.callback_id)
-                return
+            if result == OperationResult.RETRY_HOLD:
+                logger.info(
+                    "Finished %s. Operation will be retried inmmediately.", operation.callback_id
+                )
+                lock.retry_hold()
 
-            if result == OperationResult.RETRY:
-                logger.info("Finished %s. Operation will be retried.", operation.callback_id)
-                lock.retry()
+            elif result == OperationResult.RETRY_RELEASE:
+                logger.info("Finished %s. Operation will be retried later.", operation.callback_id)
+                lock.retry_release()
             else:
                 logger.info("Finished %s. Lock will be released.", operation.callback_id)
                 lock.complete()

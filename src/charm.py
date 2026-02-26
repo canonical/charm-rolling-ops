@@ -51,7 +51,7 @@ class CharmRollingOpsCharm(CharmBase):
 
         self._stored.set_default(deferred=0)
 
-    def _restart(self, event, delay: int = 0):
+    def _restart(self, delay: int = 0):
         # In a production charm, we'd perhaps import the systemd library, and run
         # systemd.restart_service.  Here, we just set a sentinel in our stored state, so
         # that we can run our tests.
@@ -60,20 +60,19 @@ class CharmRollingOpsCharm(CharmBase):
         time.sleep(int(delay))
         self.model.unit.status = ActiveStatus()
 
-    def _failed_restart(self, event, delay: int = 0):
+    def _failed_restart(self, delay: int = 0):
         logger.info("Starting failed restart operation")
         self.model.unit.status = MaintenanceStatus("Executing _failed_restart operation")
         time.sleep(int(delay))
         self.model.unit.status = MaintenanceStatus("Rolling restart operation failed")
-        return OperationResult.RETRY
+        return OperationResult.RETRY_RELEASE
 
-    def _deferred_restart(self, event, delay: int = 0, max_deferred: int = 0):
+    def _deferred_restart(self, delay: int = 0):
         logger.info(f"Starting deferred restart operation {self._stored.deferred}")
         self.model.unit.status = MaintenanceStatus("Executing _deferred_restart operation")
         time.sleep(int(delay))
-        self._stored.deferred += 1
-        if self._stored.deferred < max_deferred:
-            event.defer()
+        self.model.unit.status = MaintenanceStatus("Rolling restart operation failed")
+        return OperationResult.RETRY_HOLD
 
     def _on_install(self, event):
         self.unit.status = ActiveStatus()
@@ -98,9 +97,8 @@ class CharmRollingOpsCharm(CharmBase):
             callback_id="_deferred_restart",
             kwargs={
                 "delay": event.params.get("delay"),
-                "max_deferred": event.params.get("max-deferred"),
             },
-            max_retry=event.params.get("max-deferred", None),
+            max_retry=event.params.get("max-retry", None),
         )
 
 

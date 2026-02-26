@@ -24,14 +24,13 @@ The Rolling Ops library follows Charmhub library versioning conventions.
 
 | Version | Location |
 |-------|----------|
-| v1 | [./lib/charms/rolling_ops/v1/rollingops.py](./lib/charms/rolling_ops/v1/rollingops.py). |
-| v0 | [./lib/charms/rolling_ops/v0/rollingops.py](./lib/charms/rolling_ops/v0/rollingops.py). |
+| v1 | [lib/charms/rolling_ops/v1/rollingops.py](https://github.com/canonical/charm-rolling-ops/blob/main/lib/charms/rolling_ops/v1/rollingops.py) |
+| v0 | [lib/charms/rolling_ops/v0/rollingops.py](https://github.com/canonical/charm-rolling-ops/blob/main/lib/charms/rolling_ops/v0/rollingops.py) |
 
 While v1 builds on the same conceptual model as v0, it introduces
 several important behavioral and structural improvements:
 
 - Support for multiple queued lock requests per unit
-- Support for deferring events inside callback functions
 - Support for passing arguments to callback functions
 - Explicit retry support with per-operation retry policies
 - Deterministic scheduling:
@@ -104,13 +103,15 @@ tox -e unit
 ```
 tox -e integration
 ```
-- Manual testing instructions are included in [./tests/QA.md](./tests/QA.md)
+- Manual testing instructions are included in [tests/QA.md](https://github.com/canonical/charm-rolling-ops/blob/main/tests/QA.md)
 
 ## Contributing
 
 Please see the [Juju SDK docs](https://juju.is/docs/sdk) for guidelines
-on enhancements to this charm following best practice guidelines, and [CONTRIBUTING.md](./CONTRIBUTING.md) for developer guidance.
+on enhancements to this charm following best practice guidelines, and 
+[CONTRIBUTING.md](https://github.com/canonical/charm-rolling-ops/blob/main/CONTRIBUTING.md)
+for developer guidance.
 
 ## License
 
-Apache-2.0. See [LICENSE](./LICENSE)` for details.
+Apache-2.0. See [LICENSE](https://github.com/canonical/charm-rolling-ops/blob/main/LICENSE)` for details.

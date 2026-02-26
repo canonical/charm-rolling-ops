@@ -27,7 +27,7 @@ deferred-restart:
       description: "Introduce an artificial delay (for testing)."
       type: integer
       default: 0
-    max-deferred:
-      description: "Number of times the operation should be deferred."
+    max-retry:
+      description: "Number of times the operation should be retried."
       type: integer
 
