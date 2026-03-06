@@ -59,14 +59,14 @@ class CharmRollingOpsCharmV1(CharmBase):
         logger.info("Starting failed restart operation")
         self.model.unit.status = MaintenanceStatus("Executing _failed_restart operation")
         time.sleep(int(delay))
-        self.model.unit.status = MaintenanceStatus("Rolling restart operation failed")
+        self.model.unit.status = MaintenanceStatus("Rolling _failed_restart operation failed")
         return OperationResult.RETRY_RELEASE
 
     def _deferred_restart(self, delay: int = 0):
         logger.info("Starting deferred restart operation")
         self.model.unit.status = MaintenanceStatus("Executing _deferred_restart operation")
         time.sleep(int(delay))
-        self.model.unit.status = MaintenanceStatus("Rolling restart operation failed")
+        self.model.unit.status = MaintenanceStatus("Rolling _deferred_restart operation failed")
         return OperationResult.RETRY_HOLD
 
     def _on_install(self, event):

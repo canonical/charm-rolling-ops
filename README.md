@@ -39,8 +39,6 @@ several important behavioral and structural improvements:
 
 `v1` does not provide backward compatibility with `v0`.
 
-Charm authors are strongly encouraged to adopt `v1` for new integrations.
-
 ## Usage
 
 Follow standard Charmhub library inclusion practices:
@@ -81,12 +79,12 @@ lib in their own charms.
 │           ├── v0/
 │           └── v1/
 ├── src/
-│   └── charm.py               # Reference charm for v1 (example usage)
+│   └── charm.py               # Reference charm for v0 (example usage)
 ├── tests/
 │   ├── unit/                  # Unit & scenario tests for the library
 │   ├── integration/           # Integration tests using Juju
 │   └── charms/
-│       └── v0/                # Test-only charm for integration tests
+│       └── v1/                # Test-only charm for integration tests
 └── README.md
 ```
 
