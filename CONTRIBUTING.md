@@ -16,13 +16,13 @@ source .tox/unit/bin/activate
 
 The rolling ops library v1 lives in [lib/charms/rolling_ops/v1/rollingops.py](https://github.com/canonical/charm-rolling-ops/blob/main/lib/charms/rolling_ops/v1/rollingops.py).
 
-The example charm lives in [src/charm.py](https://github.com/canonical/charm-rolling-ops/blob/main/src/charm.py).
+The example charm lives in [tests/charms/v1/src/charm.py](https://github.com/canonical/charm-rolling-ops/blob/main/tests/charms/v1/src/charm.py).
 
 ### v0
 
 The rolling ops library v0 lives in [lib/charms/rolling_ops/v0/rollingops.py](https://github.com/canonical/charm-rolling-ops/blob/main/lib/charms/rolling_ops/v0/rollingops.py).
 
-The example charm lives in [tests/charms/v0/src/charm.py](https://github.com/canonical/charm-rolling-ops/blob/main/tests/charms/v0/src/charm.py).
+The example charm lives in [src/charm.py](https://github.com/canonical/charm-rolling-ops/blob/main/src/charm.py).
 
 ## Intended use case
 

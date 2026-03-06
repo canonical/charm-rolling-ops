@@ -9,10 +9,25 @@ restart:
       type: integer
       default: 0
 
-custom-restart:
+failed-restart:
   description: Example restart with a custom callback function. Used in testing
   params:
     delay:
       description: "Introduce an artificial delay (for testing)."
       type: integer
       default: 0
+    max-retry:
+      description: "Number of times the operation should be retried."
+      type: integer
+
+deferred-restart:
+  description: Example restart with a custom callback function. Used in testing
+  params:
+    delay:
+      description: "Introduce an artificial delay (for testing)."
+      type: integer
+      default: 0
+    max-retry:
+      description: "Number of times the operation should be retried."
+      type: integer
+

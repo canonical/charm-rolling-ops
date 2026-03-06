@@ -20,12 +20,12 @@ from unittest.mock import Mock
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus
 from ops.testing import Harness
 
-from tests.charms.v0.src.charm import CharmRollingOpsCharmV0
+from charm import CharmRollingOpsCharm
 
 
 class TestCharm(unittest.TestCase):
     def setUp(self):
-        self.harness = Harness(CharmRollingOpsCharmV0)
+        self.harness = Harness(CharmRollingOpsCharm)
         self.addCleanup(self.harness.cleanup)
         self.harness.begin_with_initial_hooks()
         # self.harness.begin()

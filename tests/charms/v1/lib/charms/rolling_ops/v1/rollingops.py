@@ -177,7 +177,7 @@ LIBAPI = 1
 # to 0 if you are raising the major API version
 LIBPATCH = 0
 
-TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S.%fZ"
 
 
 def _now_timestamp_str() -> str:

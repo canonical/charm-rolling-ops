@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import subprocess
+import shutil
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -28,12 +29,17 @@ from juju.model import Model
 from juju.unit import Unit
 from pytest_operator.plugin import OpsTest
 
-from . import architecture
 
 logger = logging.getLogger(__name__)
 
-TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S.%fZ"
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
+@pytest.fixture(scope="module", autouse=True)
+def copy_rolling_ops_library_into_charm(ops_test: OpsTest):
+    """Copy the data_interfaces library to the different charm folder."""
+    library_path = "lib/charms/rolling_ops/v1/rollingops.py"
+    install_path = "tests/charms/v1/" + library_path
+    shutil.copyfile(library_path, install_path)
 
 def _parse_timestamp(timestamp: str) -> Optional[datetime]:
     """Parse timestamp string. Return 'now' on errors to avoid selecting invalid timestamps."""
@@ -83,8 +89,7 @@ async def test_smoke(ops_test: OpsTest):
     model: Model = ops_test.model
     model_full_name: str = ops_test.model_full_name
 
-    charm = await ops_test.build_charm(".")
-    charm = f"./rolling-ops_ubuntu@22.04-{architecture.architecture}.charm"
+    charm = await ops_test.build_charm("tests/charms/v1")
     await asyncio.gather(ops_test.model.deploy(charm, application_name="rolling-ops", num_units=3))
 
     assert model.applications["rolling-ops"]

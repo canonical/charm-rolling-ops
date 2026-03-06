@@ -130,4 +130,4 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-tests/charms/v0/lib/charms/rolling_ops/rollingops.py
+tests/charms/v1/lib/charms/rolling_ops/rollingops.py

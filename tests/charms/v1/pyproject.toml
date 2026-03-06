@@ -7,7 +7,7 @@ requires-poetry = ">=2.0.0"
 
 [tool.poetry.dependencies]
 python = "^3.10"
-ops = "^3.5.1"
+ops = "^3.6.0"
 
 [tool.poetry.group.charm-libs.dependencies]
 
@@ -15,7 +15,7 @@ ops = "^3.5.1"
 optional = true
 
 [tool.poetry.group.format.dependencies]
-ruff = "^0.15.0"
+ruff = "^0.15.4"
 
 [tool.poetry.group.lint]
 optional = true
@@ -27,12 +27,13 @@ codespell = "^2.4.1"
 coverage = {extras = ["toml"], version = "^7.13.4"}
 pytest = "^9.0.2"
 pytest-asyncio = "*"
+ops = { version = ">=3.0.0", extras = ["testing"] }
 
 [tool.poetry.group.integration.dependencies]
 pytest = "^9.0.2"
 pytest-operator = "^0.43.2"
 juju = "^3.2.2"
-ops = "^3.5.1"
+ops = "^3.6.0"
 
 # Testing tools configuration
 [tool.coverage.run]
@@ -94,3 +95,4 @@ max-complexity = 10
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+

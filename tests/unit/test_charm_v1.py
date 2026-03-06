@@ -28,7 +28,7 @@ from charms.rolling_ops.v1.rollingops import (
 )
 from ops.testing import Context, PeerRelation, State
 
-from charm import CharmRollingOpsCharm
+from tests.charms.v1.src.charm import CharmRollingOpsCharmV1
 
 
 def _decode_queue_string(queue_str: str) -> list[dict]:
@@ -194,7 +194,7 @@ def test_queue_encoding_is_list_of_operation_strings():
 
 
 def test_lock_request_enqueues_and_sets_request():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     peer = PeerRelation(endpoint="restart")
     state_in = State(leader=False, relations={peer})
 
@@ -236,7 +236,7 @@ def test_lock_request_enqueues_and_sets_request():
     ],
 )
 def test_lock_request_invalid_inputs(callback_id, kwargs, max_retry):
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     peer = PeerRelation(endpoint="restart")
     state_in = State(leader=False, relations={peer})
 
@@ -250,7 +250,7 @@ def test_lock_request_invalid_inputs(callback_id, kwargs, max_retry):
 
 
 def test_existing_operation_then_new_request():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
     peer = PeerRelation(
         endpoint="restart",
@@ -271,7 +271,7 @@ def test_existing_operation_then_new_request():
 
 
 def test_new_request_does_not_overwrite_state_if_queue_not_empty():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
     executed_at = _now_timestamp_str()
     peer = PeerRelation(
@@ -296,7 +296,7 @@ def test_new_request_does_not_overwrite_state_if_queue_not_empty():
 
 
 def test_relation_changed_without_grant_does_not_run_operation():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     remote_unit_name = f"{ctx.app_name}/1"
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
     peer = PeerRelation(
@@ -317,7 +317,7 @@ def test_relation_changed_without_grant_does_not_run_operation():
 
 
 def test_lock_complete_pops_head():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     remote_unit_name = f"{ctx.app_name}/1"
     local_unit_name = f"{ctx.app_name}/0"
     queue = _make_operation_queue(callback_id="_restart", kwargs={}, max_retry=0)
@@ -340,7 +340,7 @@ def test_lock_complete_pops_head():
 
 
 def test_successful_operation_leaves_state_request_when_more_ops_remain():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     local_unit_name = f"{ctx.app_name}/0"
     remote_unit_name = f"{ctx.app_name}/1"
     queue = OperationQueue()
@@ -373,7 +373,7 @@ def test_successful_operation_leaves_state_request_when_more_ops_remain():
     ],
 )
 def test_lock_retry_marks_retry(callback_id, lock_intent):
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     remote_unit_name = f"{ctx.app_name}/1"
     local_unit_name = f"{ctx.app_name}/0"
     queue = _make_operation_queue(callback_id=callback_id, kwargs={}, max_retry=3)
@@ -409,7 +409,7 @@ def test_lock_retry_marks_retry(callback_id, lock_intent):
     ],
 )
 def test_lock_retry_drops_when_max_retry_reached(callback_id):
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     remote_unit_name = f"{ctx.app_name}/1"
     local_unit_name = f"{ctx.app_name}/0"
     operation = Operation(
@@ -439,7 +439,7 @@ def test_lock_retry_drops_when_max_retry_reached(callback_id):
 
 
 def test_lock_grant_and_release():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
     peer = PeerRelation(
         endpoint="restart",
@@ -456,7 +456,7 @@ def test_lock_grant_and_release():
 
 
 def test_scheduling_does_nothing_if_lock_already_granted():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
     remote_unit_name = f"{ctx.app_name}/1"
     now_timestamp = _now_timestamp_str()
@@ -478,7 +478,7 @@ def test_scheduling_does_nothing_if_lock_already_granted():
 
 
 def test_schedule_picks_retry_hold():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
 
     old_operation = _now_timestamp_str()
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
@@ -514,7 +514,7 @@ def test_schedule_picks_retry_hold():
 
 
 def test_schedule_picks_oldest_requested_at_among_requests():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
 
     old_queue = OperationQueue()
     old_operation = Operation(
@@ -544,7 +544,7 @@ def test_schedule_picks_oldest_requested_at_among_requests():
 
 
 def test_schedule_picks_oldest_executed_at_among_retries_when_no_requests():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
 
     old_operation = _now_timestamp_str()
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
@@ -575,7 +575,7 @@ def test_schedule_picks_oldest_executed_at_among_retries_when_no_requests():
 
 
 def test_schedule_prioritizes_requests_over_retries():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
 
     peer = PeerRelation(
@@ -599,7 +599,7 @@ def test_schedule_prioritizes_requests_over_retries():
 
 
 def test_no_unit_is_granted_if_there_are_no_requests():
-    ctx = Context(CharmRollingOpsCharm)
+    ctx = Context(CharmRollingOpsCharmV1)
     peer = PeerRelation(
         endpoint="restart",
         peers_data={1: {"state": LockIntent.IDLE.value}, 2: {"state": LockIntent.IDLE.value}},
