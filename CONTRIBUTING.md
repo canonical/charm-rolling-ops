@@ -55,13 +55,3 @@ Run integration tests
 ```
 tox -e integration
 ```
-
-Run integration tests for v1
-```
-tox -e integration-v1
-```
-
-Run integration tests for v0
-```
-tox -e integration-v0
-```
