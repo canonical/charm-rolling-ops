@@ -60,7 +60,7 @@ Keys:
 - If a callback returns `OperationResult.RETRY_RELEASE` the unit will release the
 lock and retry the operation later.
 - If a callback return `OperationResult.RETRY_HOLD` the unit will keep the
-lock and retry inmediately.
+lock and retry immediately.
 - Retry state (`attempt`) is tracked per operation.
 - When `max_retry` is exceeded, the failing operation is dropped and the unit
   proceeds to the next queued operation, if any.
@@ -861,7 +861,7 @@ class RollingOpsManagerV1(Object):
 
             if result == OperationResult.RETRY_HOLD:
                 logger.info(
-                    "Finished %s. Operation will be retried inmmediately.", operation.callback_id
+                    "Finished %s. Operation will be retried immediately.", operation.callback_id
                 )
                 lock.retry_hold()
 

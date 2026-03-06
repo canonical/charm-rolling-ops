@@ -20,7 +20,6 @@ import time
 
 from charms.rolling_ops.v1.rollingops import OperationResult, RollingOpsManagerV1
 from ops import CharmBase, main
-from ops.framework import StoredState
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus
 
 logger = logging.getLogger(__name__)
@@ -64,7 +63,7 @@ class CharmRollingOpsCharm(CharmBase):
         return OperationResult.RETRY_RELEASE
 
     def _deferred_restart(self, delay: int = 0):
-        logger.info(f"Starting deferred restart operation")
+        logger.info("Starting deferred restart operation")
         self.model.unit.status = MaintenanceStatus("Executing _deferred_restart operation")
         time.sleep(int(delay))
         self.model.unit.status = MaintenanceStatus("Rolling restart operation failed")

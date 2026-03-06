@@ -20,7 +20,6 @@ import logging
 import subprocess
 from datetime import datetime, timezone
 from typing import Optional
-from . import architecture
 
 import pytest
 from juju.action import Action
@@ -28,6 +27,8 @@ from juju.application import Application
 from juju.model import Model
 from juju.unit import Unit
 from pytest_operator.plugin import OpsTest
+
+from . import architecture
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +123,7 @@ async def test_dedupe_when_other_unit_holds_lock(ops_test: OpsTest):
         lambda: unit_a.workload_status == "maintenance",
         timeout=30,
     )
-    logger.info(f"Succesive lock request on {unit_b}.")
+    logger.info(f"Successive lock request on {unit_b}.")
     for _ in range(3):
         await unit_b.run_action("restart", delay=0)
         await asyncio.sleep(5)

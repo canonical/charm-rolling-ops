@@ -27,8 +27,6 @@ from juju.model import JujuAPIError, Model
 from juju.unit import Unit
 from pytest_operator.plugin import OpsTest
 
-from . import architecture
-
 logger = logging.getLogger(__name__)
 
 
