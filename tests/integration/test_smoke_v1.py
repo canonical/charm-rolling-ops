@@ -17,8 +17,8 @@
 import asyncio
 import json
 import logging
-import subprocess
 import shutil
+import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -29,10 +29,10 @@ from juju.model import Model
 from juju.unit import Unit
 from pytest_operator.plugin import OpsTest
 
-
 logger = logging.getLogger(__name__)
 
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
 
 @pytest.fixture(scope="module", autouse=True)
 def copy_rolling_ops_library_into_charm(ops_test: OpsTest):
@@ -40,6 +40,7 @@ def copy_rolling_ops_library_into_charm(ops_test: OpsTest):
     library_path = "lib/charms/rolling_ops/v1/rollingops.py"
     install_path = "tests/charms/v1/" + library_path
     shutil.copyfile(library_path, install_path)
+
 
 def _parse_timestamp(timestamp: str) -> Optional[datetime]:
     """Parse timestamp string. Return 'now' on errors to avoid selecting invalid timestamps."""
