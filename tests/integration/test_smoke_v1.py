@@ -20,6 +20,7 @@ import logging
 import subprocess
 from datetime import datetime, timezone
 from typing import Optional
+from . import architecture
 
 import pytest
 from juju.action import Action
@@ -71,7 +72,6 @@ def get_operations_queue(unit: Unit, model_name: str) -> list[dict]:
 
 
 @pytest.mark.abort_on_fail
-@pytest.mark.group(1)
 async def test_smoke(ops_test: OpsTest):
     """Basic smoke test following the default callback implementation.
 
@@ -83,6 +83,7 @@ async def test_smoke(ops_test: OpsTest):
     model_full_name: str = ops_test.model_full_name
 
     charm = await ops_test.build_charm(".")
+    charm = f"./rolling-ops_ubuntu@22.04-{architecture.architecture}.charm"
     await asyncio.gather(ops_test.model.deploy(charm, application_name="rolling-ops", num_units=3))
 
     assert model.applications["rolling-ops"]
@@ -105,7 +106,6 @@ async def test_smoke(ops_test: OpsTest):
 
 
 @pytest.mark.abort_on_fail
-@pytest.mark.group(1)
 async def test_dedupe_when_other_unit_holds_lock(ops_test: OpsTest):
     assert ops_test.model
     assert ops_test.model_full_name
