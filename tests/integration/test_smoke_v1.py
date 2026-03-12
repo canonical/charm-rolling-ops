@@ -14,24 +14,20 @@
 #
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 
-import asyncio
 import json
 import logging
 import shutil
-import subprocess
-from datetime import datetime, timezone
-from typing import Optional
+import time
+from datetime import datetime
 
 import pytest
-from juju.action import Action
-from juju.application import Application
-from juju.model import Model
 from juju.unit import Unit
 from pytest_operator.plugin import OpsTest
 
 logger = logging.getLogger(__name__)
 
-TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+TRACE_FILE = "/var/lib/charm-rolling-ops/transitions.log"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -42,105 +38,421 @@ def copy_rolling_ops_library_into_charm(ops_test: OpsTest):
     shutil.copyfile(library_path, install_path)
 
 
-def _parse_timestamp(timestamp: str) -> Optional[datetime]:
-    """Parse timestamp string. Return 'now' on errors to avoid selecting invalid timestamps."""
-    try:
-        dt = datetime.strptime(timestamp, TIMESTAMP_FORMAT)
-        return dt.replace(tzinfo=timezone.utc)
-    except Exception:
-        return None
+async def get_unit_events(unit: Unit) -> list[dict]:
+    action = await unit.run(f"cat {TRACE_FILE}")
+    await action.wait()
 
-
-def _get_unit_data(unit: Unit, model_name: str):
-    show_unit_json = subprocess.check_output(
-        f"JUJU_MODEL={model_name} juju show-unit {unit.name} --format json",
-        stderr=subprocess.PIPE,
-        shell=True,
-        universal_newlines=True,
-    )
-    show_unit_dict = json.loads(show_unit_json)
-    return show_unit_dict[unit.name]["relation-info"][0]["local-unit"]["data"]
-
-
-def get_executed_at(unit: Unit, model_name: str) -> Optional[datetime]:
-    unit_data = _get_unit_data(unit, model_name)
-    executed_at = unit_data.get("executed_at", "")
-    return _parse_timestamp(executed_at)
-
-
-def get_operations_queue(unit: Unit, model_name: str) -> list[dict]:
-    """Return list of operation dicts from the unit databag 'operations' string."""
-    unit_data = _get_unit_data(unit, model_name)
-    operations_raw = unit_data.get("operations", "")
-    if not operations_raw:
+    stdout = action.results.get("stdout", "")
+    if not stdout.strip():
         return []
-    outer = json.loads(operations_raw)
-    ops = [json.loads(item) for item in outer]
-    return ops
+
+    return [json.loads(line) for line in stdout.strip().splitlines()]
+
+
+def parse_ts(event: dict) -> datetime:
+    return datetime.fromisoformat(event["ts"])
 
 
 @pytest.mark.abort_on_fail
-async def test_smoke(ops_test: OpsTest):
-    """Basic smoke test following the default callback implementation.
-
-    Verify that we can deploy, and seem to be able to run a rolling op.
-    """
-    assert ops_test.model
-    assert ops_test.model_full_name
-    model: Model = ops_test.model
-    model_full_name: str = ops_test.model_full_name
-
+async def test_restart_action_one_unit(ops_test: OpsTest):
+    """Verify that restart action runs through the expected workflow."""
     charm = await ops_test.build_charm("tests/charms/v1")
-    await asyncio.gather(ops_test.model.deploy(charm, application_name="rolling-ops", num_units=3))
 
-    assert model.applications["rolling-ops"]
-    app: Application = model.applications["rolling-ops"]
+    await ops_test.model.deploy(charm, application_name="rollingops", num_units=1)
+    await ops_test.model.wait_for_idle(status="active")
 
-    await ops_test.model.block_until(lambda: app.status in ("error", "blocked", "active"))
-    assert app.status == "active"
+    unit = ops_test.model.applications["rollingops"].units[0]
 
-    action_type = "restart"
-    # Run the restart, with a delay to alleviate timing issues.
-    for unit in app.units:
-        logger.info(f"Running {action_type} - {unit.name}")
-        action: Action = await unit.run_action(action_type, delay=10)
-        await action.wait()
-        assert (action.results.get("return-code", None) == 0) or (
-            action.results.get("Code", None) == "0"
-        )
-        await model.wait_for_idle(status="active", timeout=600)
-        assert get_executed_at(unit=unit, model_name=model_full_name)
+    action = await unit.run_action("restart", delay=1)
+    await action.wait()
+    await ops_test.model.wait_for_idle(status="active", timeout=300)
+
+    events = await get_unit_events(unit)
+    restart_events = [e["event"] for e in events]
+
+    expected = [
+        "action:restart",
+        "_restart:start",
+        "_restart:done",
+    ]
+
+    assert restart_events == expected, f"unexpected event order: {restart_events}"
 
 
 @pytest.mark.abort_on_fail
-async def test_dedupe_when_other_unit_holds_lock(ops_test: OpsTest):
-    assert ops_test.model
-    assert ops_test.model_full_name
-    model: Model = ops_test.model
-    model_full_name: str = ops_test.model_full_name
+async def test_failed_restart_retries_one_unit(ops_test):
 
-    app = model.applications["rolling-ops"]
-    unit_a, unit_b = app.units[0], app.units[1]
+    unit = ops_test.model.applications["rollingops"].units[0]
+    rm = await unit.run(f"rm -f {TRACE_FILE}")
+    await rm.wait()
+    action = await unit.run_action("failed-restart", **{"delay": 1, "max-retry": 2})
+    await action.wait()
 
-    long_delay = 60
-    act_a = await unit_a.run_action("restart", delay=long_delay)
+    await ops_test.model.wait_for_idle()
 
-    await model.block_until(
-        lambda: unit_a.workload_status == "maintenance",
-        timeout=30,
-    )
-    logger.info(f"Successive lock request on {unit_b}.")
-    for _ in range(3):
-        await unit_b.run_action("restart", delay=0)
-        await asyncio.sleep(5)
+    events = await get_unit_events(unit)
+    restart_events = [e["event"] for e in events]
 
-    ops = get_operations_queue(unit=unit_b, model_name=model_full_name)
+    expected = [
+        "action:failed-restart",
+        "_failed_restart:start",  # attempt 0
+        "_failed_restart:retry_release",
+        "_failed_restart:start",  # retry 1
+        "_failed_restart:retry_release",
+        "_failed_restart:start",  # retry 2
+        "_failed_restart:retry_release",
+    ]
 
-    assert len(ops) == 1, f"expected deduped queue of length 1, got {len(ops)}: {ops}"
+    assert restart_events == expected, f"unexpected event order: {restart_events}"
 
-    logger.info(f"Waiting for {unit_a} to finish execution.")
-    await act_a.wait()
-    await model.wait_for_idle(apps=["rolling-ops"], status="active", timeout=600)
-    executed_a = get_executed_at(unit=unit_a, model_name=model_full_name)
-    executed_b = get_executed_at(unit=unit_b, model_name=model_full_name)
-    assert executed_b > executed_a
+
+@pytest.mark.abort_on_fail
+async def test_deferred_restart_retries_one_unit(ops_test):
+
+    unit = ops_test.model.applications["rollingops"].units[0]
+    rm = await unit.run(f"rm -f {TRACE_FILE}")
+    await rm.wait()
+    action = await unit.run_action("deferred-restart", **{"delay": 1, "max-retry": 2})
+    await action.wait()
+
+    await ops_test.model.wait_for_idle()
+
+    events = await get_unit_events(unit)
+    restart_events = [e["event"] for e in events]
+
+    expected = [
+        "action:deferred-restart",
+        "_deferred_restart:start",  # attempt 0
+        "_deferred_restart:retry_hold",
+        "_deferred_restart:start",  # retry 1
+        "_deferred_restart:retry_hold",
+        "_deferred_restart:start",  # retry 2
+        "_deferred_restart:retry_hold",
+    ]
+
+    assert restart_events == expected, f"unexpected event order: {restart_events}"
+
+
+@pytest.mark.abort_on_fail
+async def test_restart_rolls_one_unit_at_a_time(ops_test):
+
+    await ops_test.model.applications["rollingops"].add_unit(count=4)
+    await ops_test.model.wait_for_idle(wait_for_at_least_units=5)
+
+    units = ops_test.model.applications["rollingops"].units
+
+    for unit in units:
+        rm = await unit.run(f"rm -f {TRACE_FILE}")
+        await rm.wait()
+
+    for unit in units:
+        await unit.run_action("restart", **{"delay": 2})
+
+    await ops_test.model.wait_for_idle(status="active", timeout=600)
+
+    all_events = []
+    for unit in units:
+        events = await get_unit_events(unit)
+        assert len(events) == 3
+        all_events.extend(events)
+
+    restart_events = [e for e in all_events if e["event"] in {"_restart:start", "_restart:done"}]
+    restart_events.sort(key=parse_ts)
+
+    logger.info(restart_events)
+
+    for i in range(0, len(restart_events), 2):
+        start_event = restart_events[i]
+        done_event = restart_events[i + 1]
+
+        assert start_event["event"] == "_restart:start"
+        assert done_event["event"] == "_restart:done"
+        assert start_event["unit"] == done_event["unit"], (
+            f"start/done pair mismatch: {start_event} vs {done_event}"
+        )
+
+
+@pytest.mark.abort_on_fail
+async def test_retry_hold_keeps_lock_on_same_unit(ops_test):
+    units = ops_test.model.applications["rollingops"].units
+    for unit in units:
+        rm = await unit.run(f"rm -f {TRACE_FILE}")
+        await rm.wait()
+
+    unit_a = units[1]
+    unit_b = units[3]
+
+    action = await unit_a.run_action("deferred-restart", **{"delay": 10, "max-retry": 2})
+    await action.wait()
+    await unit_b.run_action("restart", **{"delay": 2})
+
+    await ops_test.model.wait_for_idle()
+
+    all_events = []
+    all_events.extend(await get_unit_events(unit_a))
+    all_events.extend(await get_unit_events(unit_b))
+    all_events.sort(key=parse_ts)
+
+    logger.info(all_events)
+
+    relevant_events = [
+        e
+        for e in all_events
+        if e["event"]
+        in {
+            "_deferred_restart:start",
+            "_deferred_restart:retry_hold",
+            "_restart:start",
+            "_restart:done",
+        }
+    ]
+
+    sequence = [(e["unit"], e["event"]) for e in relevant_events]
+
+    logger.info(sequence)
+
+    assert sequence == [
+        (unit_a.name, "_deferred_restart:start"),  # attempt 0
+        (unit_a.name, "_deferred_restart:retry_hold"),
+        (unit_a.name, "_deferred_restart:start"),  # retry 1
+        (unit_a.name, "_deferred_restart:retry_hold"),
+        (unit_a.name, "_deferred_restart:start"),  # retry 2
+        (unit_a.name, "_deferred_restart:retry_hold"),
+        (unit_b.name, "_restart:start"),
+        (unit_b.name, "_restart:done"),
+    ], f"unexpected event sequence: {sequence}"
+
+
+@pytest.mark.abort_on_fail
+async def test_retry_release_alternates_execution(ops_test):
+    units = ops_test.model.applications["rollingops"].units
+    for unit in units:
+        rm = await unit.run(f"rm -f {TRACE_FILE}")
+        await rm.wait()
+
+    unit_a = units[2]
+    unit_b = units[4]
+
+    action = await unit_a.run_action("failed-restart", **{"delay": 10, "max-retry": 2})
+    await action.wait()
+    await unit_b.run_action("failed-restart", **{"delay": 1, "max-retry": 2})
+
+    await ops_test.model.wait_for_idle()
+
+    all_events = []
+    all_events.extend(await get_unit_events(unit_a))
+    all_events.extend(await get_unit_events(unit_b))
+    all_events.sort(key=parse_ts)
+
+    logger.info(all_events)
+
+    relevant_events = [
+        e
+        for e in all_events
+        if e["event"] in {"_failed_restart:start", "_failed_restart:retry_release"}
+    ]
+
+    sequence = [(e["unit"], e["event"]) for e in relevant_events]
+
+    logger.info(sequence)
+
+    assert sequence == [
+        (unit_a.name, "_failed_restart:start"),  # attempt 0
+        (unit_a.name, "_failed_restart:retry_release"),
+        (unit_b.name, "_failed_restart:start"),  # attempt 0
+        (unit_b.name, "_failed_restart:retry_release"),
+        (unit_a.name, "_failed_restart:start"),  # retry 1
+        (unit_a.name, "_failed_restart:retry_release"),
+        (unit_b.name, "_failed_restart:start"),  # retry 1
+        (unit_b.name, "_failed_restart:retry_release"),
+        (unit_a.name, "_failed_restart:start"),  # retry 2
+        (unit_a.name, "_failed_restart:retry_release"),
+        (unit_b.name, "_failed_restart:start"),  # retry 2
+        (unit_b.name, "_failed_restart:retry_release"),
+    ], f"unexpected event sequence: {sequence}"
+
+
+@pytest.mark.abort_on_fail
+async def test_subsequent_lock_request_of_different_ops(ops_test):
+    units = ops_test.model.applications["rollingops"].units
+    for unit in units:
+        rm = await unit.run(f"rm -f {TRACE_FILE}")
+        await rm.wait()
+
+    unit_a = units[3]
+    unit_b = units[4]
+
+    action = await unit_b.run_action("deferred-restart", **{"delay": 10, "max-retry": 2})
+    await action.wait()
+    action = await unit_a.run_action("failed-restart", **{"delay": 1, "max-retry": 2})
+    await action.wait()
+    action = await unit_a.run_action("restart", **{"delay": 1})
+    await action.wait()
+    action = await unit_a.run_action("deferred-restart", **{"delay": 1, "max-retry": 0})
+    await action.wait()
+    action = await unit_a.run_action("restart", **{"delay": 1})
+    await action.wait()
+
+    await ops_test.model.wait_for_idle()
+
+    unit_a_events = await get_unit_events(unit_a)
+    relevant_events = [e["event"] for e in unit_a_events]
+
+    logger.info(relevant_events)
+
+    assert relevant_events == [
+        "action:failed-restart",
+        "action:restart",
+        "action:deferred-restart",
+        "action:restart",
+        "_failed_restart:start",  # attempt 0
+        "_failed_restart:retry_release",
+        "_failed_restart:start",  # retry 1
+        "_failed_restart:retry_release",
+        "_failed_restart:start",  # retry 2
+        "_failed_restart:retry_release",
+        "_restart:start",
+        "_restart:done",
+        "_deferred_restart:start",  # attempt 0
+        "_deferred_restart:retry_hold",
+        "_restart:start",
+        "_restart:done",
+    ], f"unexpected event sequence: {relevant_events}"
+
+
+@pytest.mark.abort_on_fail
+async def test_subsequent_lock_request_of_same_op(ops_test):
+    units = ops_test.model.applications["rollingops"].units
+    for unit in units:
+        rm = await unit.run(f"rm -f {TRACE_FILE}")
+        await rm.wait()
+
+    unit_a = units[3]
+    unit_b = units[4]
+
+    action = await unit_b.run_action("deferred-restart", **{"delay": 10, "max-retry": 1})
+    await action.wait()
+    action = await unit_a.run_action("failed-restart", **{"delay": 1, "max-retry": 2})
+    await action.wait()
+    for i in range(3):
+        action = await unit_a.run_action("restart", **{"delay": 1})
+        await action.wait()
+
+    await ops_test.model.wait_for_idle()
+
+    unit_a_events = await get_unit_events(unit_a)
+    relevant_events = [e["event"] for e in unit_a_events]
+
+    logger.info(relevant_events)
+
+    assert relevant_events == [
+        "action:failed-restart",
+        "action:restart",
+        "action:restart",
+        "action:restart",
+        "_failed_restart:start",  # attempt 0
+        "_failed_restart:retry_release",
+        "_failed_restart:start",  # retry 1
+        "_failed_restart:retry_release",
+        "_failed_restart:start",  # retry 2
+        "_failed_restart:retry_release",
+        "_restart:start",
+        "_restart:done",
+    ], f"unexpected event sequence: {relevant_events}"
+
+
+@pytest.mark.abort_on_fail
+async def test_force_remove_unit_holding_the_lock(ops_test):
+    units = ops_test.model.applications["rollingops"].units
+    for unit in units:
+        rm = await unit.run(f"rm -f {TRACE_FILE}")
+        await rm.wait()
+
+    unit_a = units[1]
+    unit_b = units[2]
+
+    action = await unit_a.run_action("deferred-restart", **{"delay": 10})
+    await action.wait()
+    action = await unit_b.run_action("restart", **{"delay": 1})
+    await action.wait()
+
+    time.sleep(10)
+    logger.info("Removing unit %s", unit_a.name)
+    await ops_test.model.destroy_unit(unit_a.name, force=True)
+    await ops_test.model.wait_for_idle()
+
+    unit_b_events = await get_unit_events(unit_b)
+
+    relevant_events = [e["event"] for e in unit_b_events]
+
+    logger.info(relevant_events)
+
+    assert relevant_events == [
+        "action:restart",
+        "_restart:start",
+        "_restart:done",
+    ], f"unexpected event sequence: {relevant_events}"
+
+
+@pytest.mark.abort_on_fail
+async def test_remove_unit_holding_the_lock(ops_test):
+    units = ops_test.model.applications["rollingops"].units
+    for unit in units:
+        rm = await unit.run(f"rm -f {TRACE_FILE}")
+        await rm.wait()
+
+    unit_a = units[1]
+    unit_b = units[2]
+
+    action = await unit_a.run_action("deferred-restart", **{"delay": 10})
+    await action.wait()
+    action = await unit_b.run_action("restart", **{"delay": 1})
+    await action.wait()
+
+    time.sleep(10)
+    logger.info("Removing unit %s", unit_a.name)
+    await ops_test.model.destroy_unit(unit_a.name)
+    await ops_test.model.wait_for_idle()
+
+    unit_b_events = await get_unit_events(unit_b)
+    relevant_events = [e["event"] for e in unit_b_events]
+
+    logger.info(relevant_events)
+
+    assert relevant_events == [
+        "action:restart",
+        "_restart:start",
+        "_restart:done",
+    ], f"unexpected event sequence: {relevant_events}"
+
+
+@pytest.mark.abort_on_fail
+async def test_retry_on_leader_unit_leaves_the_hook(ops_test):
+    units = ops_test.model.applications["rollingops"].units
+    for unit in units:
+        rm = await unit.run(f"rm -f {TRACE_FILE}")
+        await rm.wait()
+
+    leader = None
+    non_leader = None
+    for unit in units:
+        if await unit.is_leader_from_status():
+            leader = unit
+        else:
+            non_leader = unit
+
+    action = await leader.run_action("failed-restart", **{"delay": 5})
+    await action.wait()
+    action = await non_leader.run_action("restart", **{"delay": 3})
+    await action.wait()
+
+    await ops_test.model.wait_for_idle(status="active", wait_for_at_least_units=2)
+
+    non_leader_events = await get_unit_events(non_leader)
+    relevant_events = [e["event"] for e in non_leader_events]
+
+    assert relevant_events == [
+        "action:restart",
+        "_restart:start",
+        "_restart:done",
+    ], f"unexpected event sequence: {relevant_events}"

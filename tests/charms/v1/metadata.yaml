@@ -5,15 +5,14 @@ name: rolling-ops
 display-name: Rolling Ops Library and Example Charm
 summary: Sample charm and reusable library.
 description: |
-  This is a charm containing the Rolling Ops library, along with a sample implementation.
-docs: https://discourse.charmhub.io/t/rolling-ops-example-app-overview/13939
+  This is a charm containing the Rolling Ops library v1, along with a sample implementation.
+docs: https://github.com/canonical/charm-rolling-ops/blob/main/README.md
 source: https://github.com/canonical/charm-rolling-ops
 issues: https://github.com/canonical/charm-rolling-ops/issues
 website:
   - https://charmhub.io/rolling-ops
   - https://github.com/canonical/charm-rolling-ops
   - https://matrix.to/#/%23charmhub-data-platform%3Aubuntu.com
-  - https://chat.charmhub.io/charmhub/channels/data-platform
 maintainers:
   - Canonical Data Platform <data-platform@lists.launchpad.net>
 

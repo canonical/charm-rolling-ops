@@ -16,14 +16,15 @@
 
 import json
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
 from charms.rolling_ops.v1.rollingops import (
-    TIMESTAMP_FORMAT,
     LockIntent,
     Operation,
     OperationQueue,
-    _now_timestamp,
+    RollingOpsDecodingError,
+    RollingOpsInvalidLockRequest,
     _now_timestamp_str,
 )
 from ops.testing import Context, PeerRelation, State
@@ -74,14 +75,48 @@ def test_operation_to_string_contains_string_values_only():
 
     assert obj["callback_id"] == "cb"
     assert obj["kwargs"] == '{"a":1,"b":2}'
-    assert obj["requested_at"] == ts.strftime(TIMESTAMP_FORMAT)
+    assert obj["requested_at"] == ts.isoformat()
     assert obj.get("max_retry", "") == ""
+
+
+def test_operation_to_string_contains_string_values_only_zero_max_retry():
+    ts = datetime(2026, 2, 23, 12, 0, 0, 123456, tzinfo=timezone.utc)
+    op = Operation(
+        callback_id="cb", kwargs={"b": 2, "a": 1}, requested_at=ts, max_retry=0, attempt=0
+    )
+
+    s = op.to_string()
+    obj = json.loads(s)
+
+    assert obj["callback_id"] == "cb"
+    assert obj["kwargs"] == '{"a":1,"b":2}'
+    assert obj["requested_at"] == ts.isoformat()
+    assert obj.get("max_retry", "") == "0"
+
+
+def test_operation_is_max_retry_reached_on_zero_max_retry():
+    op = Operation.create("restart", {"a": 1, "b": 2}, max_retry=0)
+    assert not op.is_max_retry_reached()
+    op.increase_attempt()
+    assert op.is_max_retry_reached()
 
 
 def test_operation_equality_and_hash_ignore_timestamp_and_max_retry():
     # Equality only depends on (callback_id, kwargs)
     op1 = Operation.create("restart", {"a": 1, "b": 2}, max_retry=0)
     op2 = Operation.create("restart", {"b": 2, "a": 1}, max_retry=999)
+
+    assert op1 == op2
+    assert hash(op1) == hash(op2)
+
+    op3 = Operation.create("restart", {"a": 2}, max_retry=0)
+    assert op1 != op3
+
+
+def test_operation_equality_and_hash_empty_arguments():
+    # Equality only depends on (callback_id, kwargs)
+    op1 = Operation.create("restart", {}, max_retry=0)
+    op2 = Operation.create("restart", {}, max_retry=999)
 
     assert op1 == op2
     assert hash(op1) == hash(op2)
@@ -103,13 +138,129 @@ def test_operation_to_string_and_from_string():
     assert op2.kwargs == op1.kwargs
     assert op2.requested_at == op1.requested_at
     assert op2.max_retry == op1.max_retry
+    assert op2.attempt == op1.attempt
+
+
+def test_operation_from_string_valid_payload():
+    requested_at = datetime(2026, 3, 12, 10, 30, 45, 123456, tzinfo=timezone.utc)
+    payload = json.dumps({
+        "callback_id": "cb-123",
+        "kwargs": json.dumps({"b": 2, "a": "x"}),
+        "requested_at": requested_at.isoformat(),
+        "max_retry": "5",
+        "attempt": "2",
+    })
+
+    op = Operation.from_string(payload)
+
+    assert op is not None
+    assert op.callback_id == "cb-123"
+    assert op.kwargs == {"b": 2, "a": "x"}
+    assert op.requested_at == requested_at
+    assert op.max_retry == 5
+    assert op.attempt == 2
+
+
+def test_from_string_valid_payload_with_empty_kwargs_and_no_max_retry():
+    requested_at = datetime(2026, 3, 12, 10, 30, 45, 123456, tzinfo=timezone.utc)
+    payload = json.dumps({
+        "callback_id": "cb-123",
+        "kwargs": "",
+        "requested_at": requested_at.isoformat(),
+        "max_retry": "",
+        "attempt": "0",
+    })
+
+    op = Operation.from_string(payload)
+
+    assert op is not None
+    assert op.callback_id == "cb-123"
+    assert op.kwargs == {}
+    assert op.requested_at == requested_at
+    assert op.max_retry is None
+    assert op.attempt == 0
+
+
+def test_from_string_valid_payload_with_empty_kwargs_and_0_max_retry():
+    requested_at = datetime(2026, 3, 12, 10, 30, 45, 123456, tzinfo=timezone.utc)
+    payload = json.dumps({
+        "callback_id": "cb-123",
+        "kwargs": "{}",
+        "requested_at": requested_at.isoformat(),
+        "max_retry": "0",
+        "attempt": "0",
+    })
+
+    op = Operation.from_string(payload)
+
+    assert op is not None
+    assert op.callback_id == "cb-123"
+    assert op.kwargs == {}
+    assert op.requested_at == requested_at
+    assert op.max_retry == 0
+    assert op.attempt == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{not valid json",
+        json.dumps(  # invalid requested_at
+            {
+                "callback_id": "cb-123",
+                "kwargs": json.dumps({"x": 1}),
+                "requested_at": "bad-ts",
+                "max_retry": "3",
+                "attempt": "1",
+            }
+        ),
+        json.dumps(  # invalid kwargs
+            {
+                "callback_id": "cb-123",
+                "kwargs": "{bad kwargs json",
+                "requested_at": datetime.now(timezone.utc).isoformat(),
+                "max_retry": "3",
+                "attempt": "1",
+            }
+        ),
+        json.dumps(  # missing callback_id
+            {
+                "kwargs": json.dumps({"x": 1}),
+                "requested_at": datetime.now(timezone.utc).isoformat(),
+                "max_retry": "3",
+                "attempt": "1",
+            }
+        ),
+        json.dumps(  # invalid kwargs
+            {
+                "callback_id": "cb-123",
+                "kwargs": "[]",
+                "requested_at": datetime.now(timezone.utc).isoformat(),
+                "max_retry": "3",
+                "attempt": "1",
+            }
+        ),
+        json.dumps(  # missing requested_at
+            {
+                "callback_id": "cb-123",
+                "kwargs": "{}",
+                "requested_at": "",
+                "max_retry": "3",
+                "attempt": "1",
+            }
+        ),
+    ],
+)
+def test_operation_from_string_invalid_inputs_return_none(payload):
+    with pytest.raises(RollingOpsDecodingError, match="Failed to deserialize"):
+        Operation.from_string(payload)
 
 
 def test_queue_empty_behaviour():
     q = OperationQueue()
 
     assert len(q) == 0
-    assert q.is_empty() is True
+    assert q.empty is True
     assert q.peek() is None
     assert q.dequeue() is None
 
@@ -118,8 +269,8 @@ def test_queue_empty_behaviour():
 
 def test_queue_enqueue_and_fifo_order():
     q = OperationQueue()
-    assert q.enqueue_lock_request("a", {"i": 1}) is True
-    assert q.enqueue_lock_request("b", {"i": 2}) is True
+    q.enqueue_lock_request("a", {"i": 1})
+    q.enqueue_lock_request("b", {"i": 2})
 
     assert len(q) == 2
     assert q.peek().callback_id == "a"
@@ -131,22 +282,22 @@ def test_queue_enqueue_and_fifo_order():
 
     second = q.dequeue()
     assert second.callback_id == "b"
-    assert q.is_empty() is True
+    assert q.empty is True
 
 
 def test_queue_deduplicates_only_against_last_item():
     q = OperationQueue()
 
-    assert q.enqueue_lock_request("restart", {"x": 1}) is True
+    q.enqueue_lock_request("restart", {"x": 1})
     assert len(q) == 1
 
-    assert q.enqueue_lock_request("restart", {"x": 1}) is False
+    q.enqueue_lock_request("restart", {"x": 1})
     assert len(q) == 1
 
-    assert q.enqueue_lock_request("restart", {"x": 2}) is True
+    q.enqueue_lock_request("restart", {"x": 2})
     assert len(q) == 2
 
-    assert q.enqueue_lock_request("restart", {"x": 1}) is True
+    q.enqueue_lock_request("restart", {"x": 1})
     assert len(q) == 3
 
 
@@ -162,18 +313,23 @@ def test_queue_to_string_and_from_string():
     assert q2.peek().callback_id == "a"
     assert q2.dequeue().callback_id == "a"
     assert q2.dequeue().callback_id == "b"
-    assert q2.is_empty()
+    assert q2.empty
 
 
 def test_queue_from_string_empty_string_is_empty_queue():
     q = OperationQueue.from_string("")
-    assert q.is_empty()
+    assert q.empty
     assert q.peek() is None
 
 
 def test_queue_from_string_rejects_non_list_json():
     with pytest.raises(ValueError, match="JSON list"):
         OperationQueue.from_string(json.dumps({"not": "a list"}))
+
+
+def test_queue_from_string_rejects_invalid_jason():
+    with pytest.raises(ValueError, match="Failed to deserialize OperationQueue"):
+        OperationQueue.from_string("{invalid")
 
 
 def test_queue_encoding_is_list_of_operation_strings():
@@ -193,18 +349,23 @@ def test_queue_encoding_is_list_of_operation_strings():
     assert "requested_at" in op_dicts[0]
 
 
-def test_lock_request_enqueues_and_sets_request():
+def test_lock_request_enqueues_and_sets_request(tmp_path):
     ctx = Context(CharmRollingOpsCharmV1)
     peer = PeerRelation(endpoint="restart")
     state_in = State(leader=False, relations={peer})
 
-    state_out = ctx.run(
-        ctx.on.action("restart", params={"delay": 10}),
-        state_in,
-    )
+    trace_file = tmp_path / "transitions.log"
+    with patch(
+        "tests.charms.v1.src.charm.TRACE_FILE",
+        trace_file,
+    ):
+        state_out = ctx.run(
+            ctx.on.action("restart", params={"delay": 10}),
+            state_in,
+        )
 
     databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.REQUEST.value
+    assert databag["state"] == LockIntent.REQUEST
     assert databag["operations"]
 
     q = OperationQueue.from_string(databag["operations"])
@@ -217,52 +378,92 @@ def test_lock_request_enqueues_and_sets_request():
 
 
 @pytest.mark.parametrize(
-    "callback_id, kwargs, max_retry",
+    "max_retry",
     [
-        # callback_id
-        ("", {}, 0),
-        ("   ", {}, 0),
-        ("unknown", {}, 0),
-        (None, {}, 0),
-        (123, {}, 0),
-        # kwargs
-        ("_restart", "nope", 0),
-        ("_restart", [], 0),
-        ("_restart", {"x": OperationQueue()}, 0),
-        # max_retry
-        ("_restart", {}, -5),
-        ("_restart", {}, -1),
-        ("_restart", {}, "3"),
+        (-5),
+        (-1),
+        ("3"),
     ],
 )
-def test_lock_request_invalid_inputs(callback_id, kwargs, max_retry):
+def test_lock_request_invalid_inputs(max_retry):
     ctx = Context(CharmRollingOpsCharmV1)
     peer = PeerRelation(endpoint="restart")
     state_in = State(leader=False, relations={peer})
 
     with ctx(ctx.on.update_status(), state_in) as mgr:
-        with pytest.raises(ValueError):
+        with pytest.raises(RollingOpsInvalidLockRequest):
             mgr.charm.restart_manager.request_async_lock(
-                callback_id=callback_id,
-                kwargs=kwargs,
+                callback_id="_restart",
+                kwargs={},
                 max_retry=max_retry,
             )
 
 
-def test_existing_operation_then_new_request():
+@pytest.mark.parametrize(
+    "callback_id",
+    [
+        ("",),
+        ("   ",),
+        ("unknown",),
+    ],
+)
+def test_lock_request_invalid_callback_id(callback_id):
+    ctx = Context(CharmRollingOpsCharmV1)
+    peer = PeerRelation(endpoint="restart")
+    state_in = State(leader=False, relations={peer})
+
+    with ctx(ctx.on.update_status(), state_in) as mgr:
+        with pytest.raises(RollingOpsInvalidLockRequest, match="Unknown callback_id"):
+            mgr.charm.restart_manager.request_async_lock(
+                callback_id=callback_id,
+                kwargs={},
+                max_retry=0,
+            )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        ("nope"),
+        ([]),
+        ({"x": OperationQueue()}),
+    ],
+)
+def test_lock_request_invalid_kwargs(kwargs):
+    ctx = Context(CharmRollingOpsCharmV1)
+    peer = PeerRelation(endpoint="restart")
+    state_in = State(leader=False, relations={peer})
+
+    with ctx(ctx.on.update_status(), state_in) as mgr:
+        with pytest.raises(
+            RollingOpsInvalidLockRequest, match="Failed to create the lock request"
+        ):
+            mgr.charm.restart_manager.request_async_lock(
+                callback_id="_restart",
+                kwargs=kwargs,
+                max_retry=0,
+            )
+
+
+def test_existing_operation_then_new_request(tmp_path):
     ctx = Context(CharmRollingOpsCharmV1)
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
     peer = PeerRelation(
         endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST.value, "operations": queue.to_string()},
+        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
     )
 
     state_in = State(leader=False, relations={peer})
 
-    state_out = ctx.run(ctx.on.action("restart", params={"delay": 10}), state_in)
+    trace_file = tmp_path / "transitions.log"
+    with patch(
+        "tests.charms.v1.src.charm.TRACE_FILE",
+        trace_file,
+    ):
+        state_out = ctx.run(ctx.on.action("restart", params={"delay": 10}), state_in)
 
     databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.REQUEST.value
+    assert databag["state"] == LockIntent.REQUEST
     result = OperationQueue.from_string(databag["operations"])
 
     assert len(result) == 2
@@ -270,24 +471,29 @@ def test_existing_operation_then_new_request():
     assert result.operations[1].callback_id == "_restart"
 
 
-def test_new_request_does_not_overwrite_state_if_queue_not_empty():
+def test_new_request_does_not_overwrite_state_if_queue_not_empty(tmp_path):
     ctx = Context(CharmRollingOpsCharmV1)
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
     executed_at = _now_timestamp_str()
     peer = PeerRelation(
         endpoint="restart",
         local_unit_data={
-            "state": LockIntent.RETRY_RELEASE.value,
+            "state": LockIntent.RETRY_RELEASE,
             "executed_at": executed_at,
             "operations": queue.to_string(),
         },
     )
     state_in = State(leader=False, relations={peer})
 
-    state_out = ctx.run(ctx.on.action("restart", params={"delay": 10}), state_in)
+    trace_file = tmp_path / "transitions.log"
+    with patch(
+        "tests.charms.v1.src.charm.TRACE_FILE",
+        trace_file,
+    ):
+        state_out = ctx.run(ctx.on.action("restart", params={"delay": 10}), state_in)
 
     databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.RETRY_RELEASE.value
+    assert databag["state"] == LockIntent.RETRY_RELEASE
     assert databag["executed_at"] == executed_at
     result = OperationQueue.from_string(databag["operations"])
     assert len(result) == 2
@@ -301,7 +507,7 @@ def test_relation_changed_without_grant_does_not_run_operation():
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
     peer = PeerRelation(
         endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST.value, "operations": queue.to_string()},
+        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
         local_app_data={"granted_unit": remote_unit_name, "granted_at": _now_timestamp_str()},
     )
 
@@ -310,7 +516,7 @@ def test_relation_changed_without_grant_does_not_run_operation():
     state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
 
     databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.REQUEST.value
+    assert databag["state"] == LockIntent.REQUEST
     result = OperationQueue.from_string(databag["operations"])
     assert len(result) == 1
     assert databag.get("executed_at", "") == ""
@@ -323,7 +529,7 @@ def test_lock_complete_pops_head():
     queue = _make_operation_queue(callback_id="_restart", kwargs={}, max_retry=0)
     peer = PeerRelation(
         endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST.value, "operations": queue.to_string()},
+        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
         local_app_data={"granted_unit": local_unit_name, "granted_at": _now_timestamp_str()},
     )
     state_in = State(leader=False, relations={peer})
@@ -331,7 +537,7 @@ def test_lock_complete_pops_head():
     state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
 
     databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.IDLE.value
+    assert databag["state"] == LockIntent.IDLE
     assert databag["executed_at"] is not None
     assert databag.get("operations", None) == "[]"
 
@@ -339,7 +545,7 @@ def test_lock_complete_pops_head():
     assert len(q) == 0
 
 
-def test_successful_operation_leaves_state_request_when_more_ops_remain():
+def test_successful_operation_leaves_state_request_when_more_ops_remain(tmp_path):
     ctx = Context(CharmRollingOpsCharmV1)
     local_unit_name = f"{ctx.app_name}/0"
     remote_unit_name = f"{ctx.app_name}/1"
@@ -349,16 +555,21 @@ def test_successful_operation_leaves_state_request_when_more_ops_remain():
 
     peer = PeerRelation(
         endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST.value, "operations": queue.to_string()},
+        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
         local_app_data={"granted_unit": local_unit_name, "granted_at": _now_timestamp_str()},
     )
 
     state_in = State(leader=False, relations={peer})
 
-    state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
+    trace_file = tmp_path / "transitions.log"
+    with patch(
+        "tests.charms.v1.src.charm.TRACE_FILE",
+        trace_file,
+    ):
+        state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
 
     databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.REQUEST.value
+    assert databag["state"] == LockIntent.REQUEST
     q = OperationQueue.from_string(databag["operations"])
     assert len(q) == 1
     current_operation = q.peek()
@@ -368,23 +579,28 @@ def test_successful_operation_leaves_state_request_when_more_ops_remain():
 @pytest.mark.parametrize(
     "callback_id, lock_intent",
     [
-        ("_failed_restart", LockIntent.RETRY_RELEASE.value),
-        ("_deferred_restart", LockIntent.RETRY_HOLD.value),
+        ("_failed_restart", LockIntent.RETRY_RELEASE),
+        ("_deferred_restart", LockIntent.RETRY_HOLD),
     ],
 )
-def test_lock_retry_marks_retry(callback_id, lock_intent):
+def test_lock_retry_marks_retry(callback_id, lock_intent, tmp_path):
     ctx = Context(CharmRollingOpsCharmV1)
     remote_unit_name = f"{ctx.app_name}/1"
     local_unit_name = f"{ctx.app_name}/0"
     queue = _make_operation_queue(callback_id=callback_id, kwargs={}, max_retry=3)
     peer = PeerRelation(
         endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST.value, "operations": queue.to_string()},
+        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
         local_app_data={"granted_unit": local_unit_name, "granted_at": _now_timestamp_str()},
     )
     state_in = State(leader=False, relations={peer})
 
-    state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
+    trace_file = tmp_path / "transitions.log"
+    with patch(
+        "tests.charms.v1.src.charm.TRACE_FILE",
+        trace_file,
+    ):
+        state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
 
     databag = _unit_databag(state_out, peer)
     assert databag["state"] == lock_intent
@@ -408,46 +624,54 @@ def test_lock_retry_marks_retry(callback_id, lock_intent):
         ("_deferred_restart"),
     ],
 )
-def test_lock_retry_drops_when_max_retry_reached(callback_id):
+def test_lock_retry_drops_when_max_retry_reached(callback_id, tmp_path):
     ctx = Context(CharmRollingOpsCharmV1)
     remote_unit_name = f"{ctx.app_name}/1"
     local_unit_name = f"{ctx.app_name}/0"
-    operation = Operation(
-        callback_id=callback_id,
-        kwargs={},
-        max_retry=3,
-        requested_at=_now_timestamp(),
-        attempt=3,
-    )
+
     queue = OperationQueue()
-    queue._enqueue(operation)
+    queue.enqueue_lock_request(callback_id=callback_id, kwargs={}, max_retry=3)
+    queue.peek().increase_attempt()
+    queue.peek().increase_attempt()
+    queue.peek().increase_attempt()
+
     peer = PeerRelation(
         endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST.value, "operations": queue.to_string()},
+        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
         local_app_data={"granted_unit": local_unit_name, "granted_at": _now_timestamp_str()},
     )
     state_in = State(leader=False, relations={peer})
 
-    state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
+    trace_file = tmp_path / "transitions.log"
+    with patch(
+        "tests.charms.v1.src.charm.TRACE_FILE",
+        trace_file,
+    ):
+        state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
 
     databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.IDLE.value
+    assert databag["state"] == LockIntent.IDLE
     assert databag["executed_at"] is not None
 
     q = OperationQueue.from_string(databag["operations"])
     assert len(q) == 0
 
 
-def test_lock_grant_and_release():
+def test_lock_grant_and_release(tmp_path):
     ctx = Context(CharmRollingOpsCharmV1)
     queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
     peer = PeerRelation(
         endpoint="restart",
-        peers_data={1: {"state": LockIntent.REQUEST.value, "operations": queue.to_string()}},
+        peers_data={1: {"state": LockIntent.REQUEST, "operations": queue.to_string()}},
     )
-    state = State(leader=True, relations={peer})
+    state_in = State(leader=True, relations={peer})
 
-    state = ctx.run(ctx.on.leader_elected(), state)
+    trace_file = tmp_path / "transitions.log"
+    with patch(
+        "tests.charms.v1.src.charm.TRACE_FILE",
+        trace_file,
+    ):
+        state = ctx.run(ctx.on.leader_elected(), state_in)
     databag = _app_databag(state, peer)
 
     unit_name = f"{ctx.app_name}/1"
@@ -463,8 +687,8 @@ def test_scheduling_does_nothing_if_lock_already_granted():
     peer = PeerRelation(
         endpoint="restart",
         peers_data={
-            1: {"state": LockIntent.REQUEST.value, "operations": queue.to_string()},
-            2: {"state": LockIntent.REQUEST.value, "operations": queue.to_string()},
+            1: {"state": LockIntent.REQUEST, "operations": queue.to_string()},
+            2: {"state": LockIntent.REQUEST, "operations": queue.to_string()},
         },
         local_app_data={"granted_unit": remote_unit_name, "granted_at": now_timestamp},
     )
@@ -488,17 +712,17 @@ def test_schedule_picks_retry_hold():
         endpoint="restart",
         peers_data={
             1: {
-                "state": LockIntent.RETRY_RELEASE.value,
+                "state": LockIntent.RETRY_RELEASE,
                 "operations": queue.to_string(),
                 "executed_at": new_operation,
             },
             2: {
-                "state": LockIntent.REQUEST.value,
+                "state": LockIntent.REQUEST,
                 "operations": queue.to_string(),
                 "executed_at": old_operation,
             },
             3: {
-                "state": LockIntent.RETRY_HOLD.value,
+                "state": LockIntent.RETRY_HOLD,
                 "operations": queue.to_string(),
                 "executed_at": new_operation,
             },
@@ -517,22 +741,16 @@ def test_schedule_picks_oldest_requested_at_among_requests():
     ctx = Context(CharmRollingOpsCharmV1)
 
     old_queue = OperationQueue()
-    old_operation = Operation(
-        callback_id="restart", kwargs={}, max_retry=2, requested_at=_now_timestamp(), attempt=0
-    )
-    old_queue._enqueue(old_operation)
+    old_queue.enqueue_lock_request(callback_id="restart", kwargs={}, max_retry=2)
 
     new_queue = OperationQueue()
-    new_operation = Operation(
-        callback_id="restart", kwargs={}, max_retry=2, requested_at=_now_timestamp(), attempt=0
-    )
-    new_queue._enqueue(new_operation)
+    new_queue.enqueue_lock_request(callback_id="restart", kwargs={}, max_retry=2)
 
     peer = PeerRelation(
         endpoint="restart",
         peers_data={
-            1: {"state": LockIntent.REQUEST.value, "operations": new_queue.to_string()},
-            2: {"state": LockIntent.REQUEST.value, "operations": old_queue.to_string()},
+            1: {"state": LockIntent.REQUEST, "operations": new_queue.to_string()},
+            2: {"state": LockIntent.REQUEST, "operations": old_queue.to_string()},
         },
     )
     state_in = State(leader=True, relations={peer})
@@ -554,12 +772,12 @@ def test_schedule_picks_oldest_executed_at_among_retries_when_no_requests():
         endpoint="restart",
         peers_data={
             1: {
-                "state": LockIntent.RETRY_RELEASE.value,
+                "state": LockIntent.RETRY_RELEASE,
                 "operations": queue.to_string(),
                 "executed_at": new_operation,
             },
             2: {
-                "state": LockIntent.RETRY_RELEASE.value,
+                "state": LockIntent.RETRY_RELEASE,
                 "operations": queue.to_string(),
                 "executed_at": old_operation,
             },
@@ -582,11 +800,11 @@ def test_schedule_prioritizes_requests_over_retries():
         endpoint="restart",
         peers_data={
             1: {
-                "state": LockIntent.RETRY_RELEASE.value,
+                "state": LockIntent.RETRY_RELEASE,
                 "operations": queue.to_string(),
                 "executed_at": _now_timestamp_str(),
             },
-            2: {"state": LockIntent.REQUEST.value, "operations": queue.to_string()},
+            2: {"state": LockIntent.REQUEST, "operations": queue.to_string()},
         },
     )
     state_in = State(leader=True, relations={peer})
@@ -602,7 +820,7 @@ def test_no_unit_is_granted_if_there_are_no_requests():
     ctx = Context(CharmRollingOpsCharmV1)
     peer = PeerRelation(
         endpoint="restart",
-        peers_data={1: {"state": LockIntent.IDLE.value}, 2: {"state": LockIntent.IDLE.value}},
+        peers_data={1: {"state": LockIntent.IDLE}, 2: {"state": LockIntent.IDLE}},
     )
     state_in = State(leader=True, relations={peer})
 

@@ -15,14 +15,22 @@
 
 """Sample charm using the rolling ops library."""
 
+import json
 import logging
 import time
+from pathlib import Path
 
-from charms.rolling_ops.v1.rollingops import OperationResult, RollingOpsManagerV1
+from charms.rolling_ops.v1.rollingops import (
+    OperationResult,
+    RollingOpsManagerV1,
+    _now_timestamp_str,
+)
 from ops import CharmBase, main
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus
 
 logger = logging.getLogger(__name__)
+
+TRACE_FILE = Path("/var/lib/charm-rolling-ops/transitions.log")
 
 
 class CharmRollingOpsCharmV1(CharmBase):
@@ -47,54 +55,72 @@ class CharmRollingOpsCharmV1(CharmBase):
         self.framework.observe(self.on.deferred_restart_action, self._on_deferred_restart_action)
 
     def _restart(self, delay: int = 0):
-        # In a production charm, we'd perhaps import the systemd library, and run
-        # systemd.restart_service.  Here, we just set a sentinel in our stored state, so
-        # that we can run our tests.
+        self._record_transition("_restart:start", delay=delay)
         logger.info("Starting restart operation")
         self.model.unit.status = MaintenanceStatus("Executing _restart operation")
         time.sleep(int(delay))
         self.model.unit.status = ActiveStatus()
+        self._record_transition("_restart:done")
 
     def _failed_restart(self, delay: int = 0):
+        self._record_transition("_failed_restart:start", delay=delay)
         logger.info("Starting failed restart operation")
         self.model.unit.status = MaintenanceStatus("Executing _failed_restart operation")
         time.sleep(int(delay))
         self.model.unit.status = MaintenanceStatus("Rolling _failed_restart operation failed")
+        self._record_transition("_failed_restart:retry_release")
         return OperationResult.RETRY_RELEASE
 
     def _deferred_restart(self, delay: int = 0):
+        self._record_transition("_deferred_restart:start", delay=delay)
         logger.info("Starting deferred restart operation")
         self.model.unit.status = MaintenanceStatus("Executing _deferred_restart operation")
         time.sleep(int(delay))
         self.model.unit.status = MaintenanceStatus("Rolling _deferred_restart operation failed")
+        self._record_transition("_deferred_restart:retry_hold", delay=delay)
         return OperationResult.RETRY_HOLD
 
     def _on_install(self, event):
         self.unit.status = ActiveStatus()
 
     def _on_restart_action(self, event):
+        delay = event.params.get("delay")
+        self._record_transition("action:restart", delay=delay)
         self.model.unit.status = WaitingStatus("Awaiting _restart operation")
-        self.restart_manager.request_async_lock(
-            callback_id="_restart", kwargs={"delay": event.params.get("delay")}
-        )
+        self.restart_manager.request_async_lock(callback_id="_restart", kwargs={"delay": delay})
 
     def _on_failed_restart_action(self, event):
+        delay = event.params.get("delay")
+        max_retry = event.params.get("max-retry", None)
+        self._record_transition("action:failed-restart", delay=delay, max_retry=max_retry)
         self.model.unit.status = WaitingStatus("Awaiting _failed_restart operation")
         self.restart_manager.request_async_lock(
             callback_id="_failed_restart",
-            kwargs={"delay": event.params.get("delay")},
-            max_retry=event.params.get("max-retry", None),
+            kwargs={"delay": delay},
+            max_retry=max_retry,
         )
 
     def _on_deferred_restart_action(self, event):
+        delay = event.params.get("delay")
+        max_retry = event.params.get("max-retry", None)
+        self._record_transition("action:deferred-restart", delay=delay, max_retry=max_retry)
         self.model.unit.status = WaitingStatus("Awaiting _deferred_restart operation")
         self.restart_manager.request_async_lock(
             callback_id="_deferred_restart",
-            kwargs={
-                "delay": event.params.get("delay"),
-            },
-            max_retry=event.params.get("max-retry", None),
+            kwargs={"delay": delay},
+            max_retry=max_retry,
         )
+
+    def _record_transition(self, name: str, **data) -> None:
+        TRACE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ts": _now_timestamp_str(),
+            "unit": self.model.unit.name,
+            "event": name,
+            **data,
+        }
+        with TRACE_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
 
 
 if __name__ == "__main__":
