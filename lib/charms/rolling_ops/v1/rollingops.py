@@ -982,6 +982,7 @@ class RollingOpsAsyncWorker(Object):
             os.kill(pid, signal.SIGINT)
             logger.info("Stopped RollingOps worker process PID %s", pid)
         except OSError:
+            logger.info("Failed to stop RollingOps worker process PID %s", pid)
             pass
         self._app_data.update({"rollingops-worker-pid": ""})
 
@@ -994,6 +995,8 @@ def main():
     parser.add_argument("--charm-dir", required=True)
     args = parser.parse_args()
 
+    # Sleep so that the leader unit can properly leave the hook and start a new one
+    time.sleep(10)
     dispatch_sub_cmd = (
         f"JUJU_DISPATCH_PATH=hooks/rollingops_lock_granted {args.charm_dir}/dispatch"
     )
