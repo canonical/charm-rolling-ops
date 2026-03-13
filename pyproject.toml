@@ -10,6 +10,8 @@ python = "^3.10"
 ops = "^3.6.0"
 
 [tool.poetry.group.charm-libs.dependencies]
+tenacity = "~9.0.0"
+charmlibs-interfaces-tls-certificates = ">=1.0"
 
 [tool.poetry.group.format]
 optional = true

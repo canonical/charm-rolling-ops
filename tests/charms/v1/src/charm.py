@@ -21,8 +21,8 @@ import time
 from pathlib import Path
 
 from charms.rolling_ops.v1.rollingops import (
+    EtcdRollingOpsManager,
     OperationResult,
-    RollingOpsManagerV1,
     _now_timestamp_str,
 )
 from ops import CharmBase, main
@@ -45,8 +45,12 @@ class CharmRollingOpsCharmV1(CharmBase):
             "_deferred_restart": self._deferred_restart,
         }
 
-        self.restart_manager = RollingOpsManagerV1(
-            charm=self, relation_name="restart", callback_targets=callback_targets
+        self.restart_manager = EtcdRollingOpsManager(
+            charm=self,
+            peer_relation_name="restart",
+            etcd_relation_name="etcd",
+            cluster_id="cluster-12345",
+            callback_targets=callback_targets,
         )
 
         self.framework.observe(self.on.install, self._on_install)

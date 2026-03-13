@@ -131,3 +131,4 @@ dmypy.json
 .pyre/
 
 tests/charms/v1/lib/charms/rolling_ops/v1/rollingops.py
+tests/charms/v1/lib/charms/data_platform_libs/v0/data_interfaces.py

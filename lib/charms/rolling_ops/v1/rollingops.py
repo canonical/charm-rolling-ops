@@ -12,142 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Rolling Ops v1 — coordinated rolling operations for Juju charms.
-
-This library provides a reusable mechanism for coordinating rolling operations
-across units of a Juju application using a peer-relation distributed lock.
-
-The library guarantees that at most one unit executes a rolling operation at any
-time, while allowing multiple units to enqueue operations and participate
-in a coordinated rollout.
-
-## Data model (peer relation)
-
-### Unit databag
-
-Each unit maintains a FIFO queue of operations it wishes to execute.
-
-Keys:
-- `operations`: JSON-encoded list of queued `Operation` objects
-- `state`: `"idle"` | `"request"` | `"retry"`
-- `executed_at`: UTC timestamp string indicating when the current operation last ran
-
-Each `Operation` contains:
-- `callback_id`: identifier of the callback to execute
-- `kwargs`: JSON-serializable arguments for the callback
-- `requested_at`: UTC timestamp when the operation was enqueued
-- `max_retry`: maximum retry count (`< 0` means unlimited)
-- `attempt`: current attempt number
-
-### Application databag
-
-The application databag represents the global lock state.
-
-Keys:
-- `granted_unit`: unit identifier (unit name), or empty
-- `granted_at`: UTC timestamp indicating when the lock was granted
-
-## Operation semantics
-
-- Units enqueue operations instead of overwriting a single pending request.
-- Duplicate operations (same `callback_id` and `kwargs`) are ignored if they are
-  already the last queued operation.
-- When granted the lock, a unit executes exactly one operation (the queue head).
-- After execution, the lock is released so that other units may proceed.
-
-## Retry semantics
-
-- If a callback returns `OperationResult.RETRY_RELEASE` the unit will release the
-lock and retry the operation later.
-- If a callback return `OperationResult.RETRY_HOLD` the unit will keep the
-lock and retry immediately.
-- Retry state (`attempt`) is tracked per operation.
-- When `max_retry` is exceeded, the failing operation is dropped and the unit
-  proceeds to the next queued operation, if any.
-
-## Scheduling semantics
-
-- Only the leader schedules lock grants.
-- If a valid lock grant exists, no new unit is scheduled.
-- Requests are preferred over retries.
-- Among requests, the operation with the oldest `requested_at` timestamp is selected.
-- Among retries, the operation with the oldest `executed_at` timestamp is selected.
-- Stale grants (e.g., pointing to departed units) are automatically released.
-
-All timestamps are stored in UTC using ISO 8601 format.
-
-## Using the library in a charm
-
-### 1. Declare a peer relation
-
-```yaml
-peers:
-  restart:
-    interface: rolling_op
-```
-
-Import this library into src/charm.py, and initialize a RollingOpsManager in the Charm's
-`__init__`. The Charm should also define a callback routine, which will be executed when
-a unit holds the distributed lock:
-
-src/charm.py
-```python
-from charms.rolling_ops.v1.rollingops import RollingOpsManagerv1, OperationResult
-
-class SomeCharm(CharmBase):
-    def __init__(self, *args):
-        super().__init__(*args)
-
-        self.rolling_ops = RollingOpsManagerv1(
-            charm=self,
-            relation="restart",
-            callback_targets={
-                "restart": self._restart,
-                "failed_restart": self._failed_restart,
-                "defer_restart": self._defer_restart,
-            },
-        )
-
-    def _restart(self, force: bool) -> OperationResult:
-        # perform restart logic
-        return OperationResult.RELEASE
-
-    def _failed_restart(self) -> OperationResult:
-        # perform restart logic
-        return OperationResult.RETRY_RELEASE
-
-    def _defer_restart(self) -> OperationResult:
-        if not self.ready():
-            event.defer()
-            return OperationResult.RETRY_HOLD
-        # do restart logic
-        return OperationResult.RELEASE
-```
-
-Request a rolling operation
-
-```python
-
-    def _on_restart_action(self, event) -> None:
-        self.rolling_ops.request_async_lock(
-            callback_id="restart",
-            kwargs={"force": True},
-            max_retry=3,
-    )
-```
-
-All participating units must enqueue the operation in order to be included
-in the rolling execution.
-
-Units that do not enqueue the operation will be skipped, allowing operators
-to recover from partial failures by reissuing requests selectively.
-
-Do not include sensitive information in the kwargs of the callback.
-These values will be stored in the databag.
-
-Make sure that callback_targets is not dynamic and that the mapping
-contain the expected values at the moment of the callback execution.
-"""
+"""etcd rolling ops."""
 
 import argparse
 import json
@@ -156,17 +21,23 @@ import os
 import signal
 import subprocess
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
 from sys import version_info
-from typing import Any, Callable, Iterator
+from typing import Any
 
-from ops import Model, Relation, Unit
+from charmlibs.interfaces.tls_certificates import (
+    Certificate,
+    CertificateRequestAttributes,
+    CertificateSigningRequest,
+    PrivateKey,
+)
+from charms.data_platform_libs.v0.data_interfaces import EtcdRequires
+from ops import Relation
 from ops.charm import (
     CharmBase,
-    RelationChangedEvent,
     RelationDepartedEvent,
 )
 from ops.framework import EventBase, Object
@@ -183,234 +54,24 @@ LIBAPI = 1
 # to 0 if you are raising the major API version
 LIBPATCH = 0
 
+SECRET_FIELD = "rollingops-client-secret-id"
+
+
+class RollingOpsNoEtcdRelationError(Exception):
+    """Raised if we are trying to process a lock, but do not appear to have a relation yet."""
+
+
+class RollingOpsEtcdUnreachableError(Exception):
+    """Raised if etcd server is unreachable."""
+
+
+class RollingOpsEtcdNotConfiguredError(Exception):
+    """Raised if etcd client has not been configured yet (env file does not exist)."""
+
 
 def _now_timestamp_str() -> str:
     """UTC timestamp as a string using ISO 8601 format."""
     return datetime.now(timezone.utc).isoformat()
-
-
-def _now_timestamp() -> datetime:
-    """UTC timestamp."""
-    return datetime.now(timezone.utc)
-
-
-def _parse_timestamp(timestamp: str) -> datetime | None:
-    """Parse timestamp string. Return None on errors to avoid selecting invalid timestamps."""
-    try:
-        return datetime.fromisoformat(timestamp)
-    except Exception:
-        return None
-
-
-class RollingOpsNoRelationError(Exception):
-    """Raised if we are trying to process a lock, but do not appear to have a relation yet."""
-
-
-class RollingOpsDecodingError(Exception):
-    """Raised if the content of the databag cannot be processed."""
-
-
-class RollingOpsInvalidLockRequestError(Exception):
-    """Raised if the lock request is invalid."""
-
-
-@dataclass
-class Operation:
-    """A single queued operation."""
-
-    callback_id: str
-    requested_at: datetime
-    max_retry: int | None
-    attempt: int
-    kwargs: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        """Vallidate the class attributes."""
-        if not isinstance(self.callback_id, str) or not self.callback_id.strip():
-            raise ValueError("callback_id must be a non-empty string")
-
-        if not isinstance(self.kwargs, dict):
-            raise ValueError("kwargs must be a dict")
-        try:
-            json.dumps(self.kwargs)
-        except TypeError as e:
-            raise ValueError(f"kwargs must be JSON-serializable: {e}") from e
-
-        if not isinstance(self.requested_at, datetime):
-            raise ValueError("requested_at must be a datetime")
-
-        if self.max_retry:
-            if not isinstance(self.max_retry, int):
-                raise ValueError("max_retry must be an int")
-            if self.max_retry < 0:
-                raise ValueError("max_retry must be >= 0")
-
-        if not isinstance(self.attempt, int):
-            raise ValueError("attempt must be an int")
-        if self.attempt < 0:
-            raise ValueError("attempt must be >= 0")
-
-    @classmethod
-    def create(
-        cls,
-        callback_id: str,
-        kwargs: dict[str, Any],
-        max_retry: int | None = None,
-    ) -> "Operation":
-        """Create a new operation from a callback id and kwargs."""
-        return cls(
-            callback_id=callback_id,
-            kwargs=kwargs,
-            requested_at=_now_timestamp(),
-            max_retry=max_retry,
-            attempt=0,
-        )
-
-    def _to_dict(self) -> dict[str, str]:
-        """Dict form (string-only values)."""
-        return {
-            "callback_id": self.callback_id,
-            "kwargs": self._kwargs_to_json(),
-            "requested_at": self.requested_at.isoformat(),
-            "max_retry": "" if self.max_retry is None else str(self.max_retry),
-            "attempt": str(self.attempt),
-        }
-
-    def to_string(self) -> str:
-        """Serialize to a string suitable for a Juju databag."""
-        return json.dumps(self._to_dict(), separators=(",", ":"))
-
-    def increase_attempt(self) -> None:
-        """Increment the attempt counter."""
-        self.attempt += 1
-
-    def is_max_retry_reached(self) -> bool:
-        """Return True if attempt exceeds max_retry (unless max_retry is None)."""
-        if self.max_retry is None:
-            return False
-        return self.attempt > self.max_retry
-
-    @classmethod
-    def from_string(cls, data: str) -> "Operation":
-        """Deserialize from a Juju databag string.
-
-        Raises:
-            RollingOpsDecodingError: if data cannot be deserialized.
-        """
-        try:
-            obj = json.loads(data)
-
-            return cls(
-                callback_id=obj["callback_id"],
-                requested_at=_parse_timestamp(obj["requested_at"]),
-                max_retry=int(obj["max_retry"]) if obj.get("max_retry") else None,
-                attempt=int(obj["attempt"]),
-                kwargs=json.loads(obj["kwargs"]) if obj.get("kwargs") else {},
-            )
-
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-            logger.error("Failed to deserialize Operation from %s: %s", data, e)
-            raise RollingOpsDecodingError(f"Failed to deserialize data to create an Operation {e}")
-
-    def _kwargs_to_json(self) -> str:
-        """Deterministic JSON serialization for kwargs."""
-        return json.dumps(self.kwargs, sort_keys=True, separators=(",", ":"))
-
-    def __eq__(self, other: object) -> bool:
-        """Equal for the operation."""
-        if not isinstance(other, Operation):
-            return False
-        return self.callback_id == other.callback_id and self.kwargs == other.kwargs
-
-    def __hash__(self) -> int:
-        """Hash for the operation."""
-        return hash((self.callback_id, self._kwargs_to_json()))
-
-
-class OperationQueue:
-    """In-memory FIFO queue of Operations with encode/decode helpers for storing in a databag."""
-
-    def __init__(self, operations: list[Operation] | None = None):
-        self.operations: list[Operation] = list(operations or [])
-
-    def __len__(self) -> int:
-        """Return the number of operations in the queue."""
-        return len(self.operations)
-
-    @property
-    def empty(self) -> bool:
-        """Return True if there are no queued operations."""
-        return not self.operations
-
-    def peek(self) -> Operation | None:
-        """Return the first operation in the queue if it exists."""
-        return self.operations[0] if self.operations else None
-
-    def _peek_last(self) -> Operation | None:
-        """Return the last operation in the queue if it exists."""
-        return self.operations[-1] if self.operations else None
-
-    def dequeue(self) -> Operation | None:
-        """Drop the first operation in the queue if it exists and return it."""
-        return self.operations.pop(0) if self.operations else None
-
-    def increase_attempt(self) -> None:
-        """Increment the attempt counter for the head operation and persist it."""
-        if self.empty:
-            return
-        self.operations[0].increase_attempt()
-
-    def enqueue_lock_request(
-        self, callback_id: str, kwargs: dict[str, Any], max_retry: int | None = None
-    ) -> None:
-        """Append operation only if it is not equal to the last enqueued operation."""
-        operation = Operation.create(callback_id, kwargs, max_retry=max_retry)
-
-        if last_operation := self._peek_last():
-            if last_operation == operation:
-                return
-        self.operations.append(operation)
-
-    def to_string(self) -> str:
-        """Encode entire queue to a single string."""
-        items = [op.to_string() for op in self.operations]
-        return json.dumps(items, separators=(",", ":"))
-
-    @classmethod
-    def from_string(cls, data: str) -> "OperationQueue":
-        """Decode queue from a string.
-
-        Raises:
-            RollingOpsDecodingError: if data cannot be deserialized.
-        """
-        if not data:
-            return cls()
-
-        try:
-            items = json.loads(data)
-        except json.JSONDecodeError as e:
-            logger.error(
-                "Failed to deserialize data to create an OperationQueue from %s: %s", data, e
-            )
-            raise RollingOpsDecodingError(
-                f"Failed to deserialize data to create an OperationQueue from {e}."
-            )
-
-        if not isinstance(items, list):
-            logger.error("OperationQueue string must decode to a JSON list %s:", data)
-            raise RollingOpsDecodingError("OperationQueue string must decode to a JSON list.")
-
-        operations = [Operation.from_string(s) for s in items]
-        return cls(operations)
-
-
-class LockIntent(StrEnum):
-    """Unit-level lock intents stored in unit databags."""
-
-    REQUEST = "request"
-    RETRY_RELEASE = "retry-release"
-    RETRY_HOLD = "retry-hold"
-    IDLE = "idle"
 
 
 class OperationResult(StrEnum):
@@ -421,394 +82,598 @@ class OperationResult(StrEnum):
     RETRY_HOLD = "retry-hold"
 
 
-class Lock:
-    """State machine view over peer relation databags for a single unit.
+@dataclass(frozen=True)
+class RollingOpsKeys:
+    """Collection of etcd key prefixes used for rolling operations.
 
-    This class is the only component that should directly read/write the peer relation
-    databags for lock state, queue state, and grant state.
+    Layout:
+        /rollingops/{cluster_id}/granted-unit
+        /rollingops/{cluster_id}/{owner}/pending/
+        /rollingops/{cluster_id}/{owner}/inprogress/
+        /rollingops/{cluster_id}/{owner}/completed/
 
-    Important:
-      - All relation databag values are strings.
-      - This class updates both unit databags and app databags, which triggers
-        relation-changed events.
+    The distributed lock key is cluster-scoped
     """
 
-    def __init__(self, model: Model, relation_name: str, unit: Unit):
-        if not model.relations[relation_name]:
-            # TODO: defer caller in this case (probably just fired too soon).
-            raise RollingOpsNoRelationError()
-        self.relation = model.relations[relation_name][0]
-        self.unit = unit
-        self.app = model.app
+    ROOT = "/rollingops"
+
+    cluster_id: str
+    owner: str
 
     @property
-    def _app_data(self) -> dict:
-        return self.relation.data[self.app]
+    def cluster_prefix(self) -> str:
+        """Etcd prefix corresponding to the cluster namespace."""
+        return f"{self.ROOT}/{self.cluster_id}/"
 
     @property
-    def _unit_data(self) -> dict:
-        return self.relation.data[self.unit]
+    def _owner_prefix(self) -> str:
+        """Etcd prefix for all the queues belonging to an owner."""
+        return f"{self.cluster_prefix}{self.owner}"
 
     @property
-    def _operations(self) -> OperationQueue:
-        return OperationQueue.from_string(self._unit_data.get("operations", ""))
+    def lock_key(self) -> str:
+        """Etcd key of the lock."""
+        return f"{self.cluster_prefix}granted-unit"
 
     @property
-    def _state(self) -> str:
-        return self._unit_data.get("state", "")
+    def pending(self) -> str:
+        """Prefix for operations waiting to be executed."""
+        return f"{self._owner_prefix}pending/"
 
-    def request(self, callback_id: str, kwargs: dict, max_retry: int | None = None) -> None:
-        """Enqueue an operation and mark this unit as requesting the lock.
+    @property
+    def inprogress(self) -> str:
+        """Prefix for operations currently being executed."""
+        return f"{self._owner_prefix}inprogress/"
+
+    @property
+    def completed(self) -> str:
+        """Prefix for operations that have finished execution."""
+        return f"{self._owner_prefix}completed/"
+
+    @classmethod
+    def for_owner(cls, cluster_id: str, owner: str) -> "RollingOpsKeys":
+        """Create a set of keys for a given owner on a cluster."""
+        return cls(cluster_id=cluster_id, owner=owner)
+
+
+class CertificatesManager:
+    """Manage generation and persistence of TLS certificates for etcd client access.
+
+    This class is responsible for creating and storing a client Certificate
+    Authority (CA) and a client certificate/key pair used to authenticate
+    with etcd via TLS. Certificates are generated only once and persisted
+    under a local directory so they can be reused across charm executions.
+
+    Certificates are valid for 20 years. They are not renewed or rotated.
+    """
+
+    BASE_DIR = Path("/var/lib/rollingops/tls")
+
+    CA_KEY = BASE_DIR / "client-ca.key"
+    CA_CERT = BASE_DIR / "client-ca.pem"
+    CLIENT_KEY = BASE_DIR / "client.key"
+    CLIENT_CERT = BASE_DIR / "client.pem"
+
+    VALIDITY_DAYS = 365 * 20
+
+    @classmethod
+    def exists(cls) -> bool:
+        """Check whether the required client certificates already exist.
+
+        Returns:
+            True if the client certificate and key and the CA certificate
+            are present on disk, otherwise False.
+        """
+        return (
+            cls.CA_KEY.exists()
+            and cls.CA_CERT.exists()
+            and cls.CLIENT_KEY.exists()
+            and cls.CLIENT_CERT.exists()
+        )
+
+    @classmethod
+    def load_client_cert_and_key(cls) -> tuple[str, str]:
+        """Load the client certificate and private key from disk.
+
+        Returns:
+            A tuple containing:
+            - The client certificate PEM string
+            - The client private key PEM string
+        """
+        return cls.CLIENT_CERT.read_text(), cls.CLIENT_KEY.read_text()
+
+    @classmethod
+    def client_paths(cls) -> tuple[Path, Path]:
+        """Return filesystem paths for the client certificate and key.
+
+        Returns:
+            A tuple containing:
+            - Path to the client certificate
+            - Path to the client private key
+        """
+        return cls.CLIENT_CERT, cls.CLIENT_KEY
+
+    @classmethod
+    def persist_client_cert_and_key(cls, cert_pem: str, key_pem: str) -> None:
+        """Persist the provided client certificate and key to disk.
 
         Args:
-          callback_id: identifies which callback to execute.
-          kwargs: dict of callback kwargs.
-          max_retry: None -> unlimited retries, else explicit integer.
+            cert_pem: PEM-encoded client certificate.
+            key_pem: PEM-encoded client private key.
         """
-        queue = self._operations
+        cls.BASE_DIR.mkdir(parents=True, exist_ok=True)
+        cls.CLIENT_CERT.write_text(cert_pem)
+        cls.CLIENT_KEY.write_text(key_pem)
 
-        previous_length = len(queue)
-        queue.enqueue_lock_request(callback_id, kwargs, max_retry)
-        if previous_length == len(queue):
-            logger.info(
-                "Operation %s not added to the queue. It already exists in the back of the queue.",
-                callback_id,
-            )
-            return
+        os.chmod(cls.CLIENT_CERT, 0o644)
+        os.chmod(cls.CLIENT_KEY, 0o600)
 
-        if len(queue) == 1:
-            self._unit_data.update({"state": LockIntent.REQUEST})
-
-        self._unit_data.update({"operations": queue.to_string()})
-        logger.info("Operation %s added to the queue.", callback_id)
-
-    def _set_retry(self, intent: LockIntent) -> None:
-        """Mark the given retry intent on the head operation.
-
-        If max_retry is reached, the head operation is dropped via complete().
-        """
-        self._increase_attempt()
-        if self._is_max_retry_reached():
-            logger.warning("Operation max retry reached. Dropping.")
-            self.complete()
-            return
-        self._unit_data.update({
-            "executed_at": _now_timestamp_str(),
-            "state": intent,
-        })
-
-    def retry_release(self) -> None:
-        """Indicate that the operation should be retried but the lock should be released."""
-        self._set_retry(LockIntent.RETRY_RELEASE)
-
-    def retry_hold(self) -> None:
-        """Indicate that the operation should be retried but the lock should be kept."""
-        self._set_retry(LockIntent.RETRY_HOLD)
-
-    def complete(self) -> None:
-        """Mark the head operation as completed successfully, pop it from the queue.
-
-        Update unit state depending on whether more operations remain.
-        """
-        queue = self._operations
-        queue.dequeue()
-        next_state = LockIntent.REQUEST if queue.peek() else LockIntent.IDLE
-
-        self._unit_data.update({
-            "state": next_state,
-            "operations": queue.to_string(),
-            "executed_at": _now_timestamp_str(),
-        })
-
-    def release(self) -> None:
-        """Clear the application-level grant."""
-        self._app_data.update({"granted_unit": "", "granted_at": ""})
-
-    def grant(self) -> None:
-        """Grant a lock to a unit."""
-        self._app_data.update({
-            "granted_unit": str(self.unit.name),
-            "granted_at": _now_timestamp_str(),
-        })
-
-    def is_granted(self) -> bool:
-        """Return True if the unit holds the lock."""
-        granted_unit = self._app_data.get("granted_unit", "")
-        return granted_unit == str(self.unit.name)
-
-    def should_run(self) -> bool:
-        """Return True if the lock has been granted to the unit and it is time to execute callback."""
-        return self.is_granted() and not self._unit_executed_after_grant()
-
-    def should_release(self) -> bool:
-        """Return True if the unit finished executing the callback and should be released."""
-        return self.is_completed() or self._unit_executed_after_grant()
-
-    def is_waiting(self) -> bool:
-        """Return True if this unit is waiting for a lock to be granted."""
-        return self._state == LockIntent.REQUEST and not self.is_granted()
-
-    def is_completed(self) -> bool:
-        """Return True if this unit is completed callback but still has the grant (leader should clear)."""
-        return self._state == LockIntent.IDLE and self.is_granted()
-
-    def is_retry(self) -> bool:
-        """Return True if this unit requested retry but still has the grant (leader should clear)."""
-        unit_intent = self._state
-        return (
-            unit_intent == LockIntent.RETRY_RELEASE or unit_intent == LockIntent.RETRY_HOLD
-        ) and self.is_granted()
-
-    def is_waiting_retry(self) -> bool:
-        """Return True if the unit requested retry and is waiting for lock to be granted."""
-        return self._state == LockIntent.RETRY_RELEASE and not self.is_granted()
-
-    def is_retry_hold(self) -> bool:
-        """Return True if the unit requested retry and is waiting for lock to be granted."""
-        return self._state == LockIntent.RETRY_HOLD and not self.is_granted()
-
-    def get_current_operation(self) -> Operation | None:
-        """Return the head operation for this unit, if any."""
-        return self._operations.peek()
-
-    def _is_max_retry_reached(self) -> bool:
-        """Return True if the head operation exceeded its max_retry (unless max_retry < 0)."""
-        operation = self.get_current_operation()
-        if not operation:
-            return True
-        return operation.is_max_retry_reached()
-
-    def _increase_attempt(self) -> None:
-        """Increment the attempt counter for the head operation and persist it."""
-        q = self._operations
-        q.increase_attempt()
-        self._unit_data.update({"operations": q.to_string()})
-
-    def get_last_completed(self) -> datetime | None:
-        """Get the time the unit requested a retry of the head operation."""
-        timestamp_str = self._unit_data.get("executed_at", "")
-        if timestamp_str:
-            return _parse_timestamp(timestamp_str)
-        return None
-
-    def get_requested_at(self) -> datetime:
-        """Get the time the head operation was requested at."""
-        operation = self.get_current_operation()
-        if not operation:
-            return None
-        return operation.requested_at
-
-    def _unit_executed_after_grant(self) -> bool:
-        granted_at = _parse_timestamp(self._app_data.get("granted_at", ""))
-        executed_at = _parse_timestamp(self._unit_data.get("executed_at", ""))
-
-        if granted_at is None or executed_at is None:
+    @classmethod
+    def has_client_cert_and_key(cls, cert_pem: str, key_pem: str) -> bool:
+        """Return whether the provided certificate material matches local files."""
+        if not cls.CLIENT_CERT.exists() or not cls.CLIENT_KEY.exists():
             return False
-        return executed_at > granted_at
+
+        return cls.CLIENT_CERT.read_text() == cert_pem and cls.CLIENT_KEY.read_text() == key_pem
+
+    @classmethod
+    def generate(cls, common_name: str) -> None:
+        """Generate a client CA and client certificate if they do not exist.
+
+        This method creates:
+        1. A CA private key and self-signed CA certificate.
+        2. A client private key.
+        3. A certificate signing request (CSR) using the provided common name.
+        4. A client certificate signed by the generated CA.
+
+        The generated files are written to disk and reused in future runs.
+        If the certificates already exist, this method does nothing.
+
+        Args:
+            common_name: Common Name (CN) used in the client certificate
+                subject. This value should not contain slashes.
+        """
+        if cls.exists():
+            return
+
+        cls.BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+        ca_key = PrivateKey.generate(key_size=4096)
+        ca_attributes = CertificateRequestAttributes(
+            common_name="rollingops-client-ca", is_ca=True
+        )
+        ca_crt = Certificate.generate_self_signed_ca(
+            attributes=ca_attributes,
+            private_key=ca_key,
+            validity=timedelta(days=cls.VALIDITY_DAYS),
+        )
+
+        client_key = PrivateKey.generate(key_size=4096)
+
+        csr_attributes = CertificateRequestAttributes(
+            common_name=common_name, add_unique_id_to_subject_name=False
+        )
+        csr = CertificateSigningRequest.generate(
+            attributes=csr_attributes,
+            private_key=client_key,
+        )
+
+        client_crt = Certificate.generate(
+            csr=csr,
+            ca=ca_crt,
+            ca_private_key=ca_key,
+            validity=timedelta(days=cls.VALIDITY_DAYS),
+            is_ca=False,
+        )
+
+        cls.CA_KEY.write_text(ca_key.raw)
+        cls.CA_CERT.write_text(ca_crt.raw)
+        cls.CLIENT_KEY.write_text(client_key.raw)
+        cls.CLIENT_CERT.write_text(client_crt.raw)
+
+        os.chmod(cls.CA_KEY, 0o600)
+        os.chmod(cls.CLIENT_KEY, 0o600)
+        os.chmod(cls.CA_CERT, 0o644)
+        os.chmod(cls.CLIENT_CERT, 0o644)
 
 
-class LockIterator:
-    """Iterator over Lock objects for each unit present on the peer relation."""
+class EtcdCtl:
+    """Class for interacting with etcd through the etcdctl CLI.
 
-    def __init__(self, model: Model, relation_name: str):
-        relation = model.relations[relation_name][0]
-        units = relation.units
-        units.add(model.unit)
-        self._model = model
-        self._units = units
-        self._relation_name = relation_name
+    This class encapsulates configuration and execution of the tool. It manages
+    the environment variables required for connecting to an etcd cluster,
+    including TLS configuration, and provides convenience methods for
+    executing commands and retrieving structured results.
+    """
 
-    def __iter__(self) -> Iterator[Lock]:
-        """Yields a lock for each unit we can find on the relation."""
-        for unit in self._units:
-            yield Lock(self._model, self._relation_name, unit=unit)
+    BASE_DIR = Path("/var/lib/rollingops/etcd")
+    SERVER_CA = BASE_DIR / "server-ca.pem"
+    ENV_FILE = BASE_DIR / "etcdctl.env"
 
+    @classmethod
+    def write_env_file(
+        cls,
+        endpoints: str,
+        tls_ca_pem: str,
+        client_cert_path: Path,
+        client_key_path: Path,
+    ) -> None:
+        """Create or update the etcdctl environment configuration file.
 
-def pick_oldest_completed(locks: list[Lock]) -> Lock | None:
-    """Choose the retry lock with the oldest executed_at timestamp."""
-    selected = None
-    oldest_timestamp = None
+        This method writes an environment file containing the required
+        ETCDCTL_* variables used by etcdctl to connect to the etcd cluster.
 
-    for lock in locks:
-        timestamp = lock.get_last_completed()
-        if not timestamp:
-            continue
+        Args:
+            endpoints: Comma-separated list of etcd endpoints.
+            tls_ca_pem: PEM-encoded CA certificate used to verify the etcd server.
+            client_cert_path: Path to the client TLS certificate.
+            client_key_path: Path to the client TLS private key.
+        """
+        cls.BASE_DIR.mkdir(parents=True, exist_ok=True)
+        cls.SERVER_CA.write_text(tls_ca_pem or "")
+        os.chmod(cls.SERVER_CA, 0o644)
 
-        if oldest_timestamp is None or timestamp < oldest_timestamp:
-            oldest_timestamp = timestamp
-            selected = lock
+        lines = [
+            'export ETCDCTL_API="3"',
+            f'export ETCDCTL_ENDPOINTS="{endpoints}"',
+            f'export ETCDCTL_CACERT="{cls.SERVER_CA}"',
+            f'export ETCDCTL_CERT="{client_cert_path}"',
+            f'export ETCDCTL_KEY="{client_key_path}"',
+            "",
+        ]
 
-    return selected
+        cls.ENV_FILE.write_text("\n".join(lines))
+        os.chmod(cls.ENV_FILE, 0o600)
 
+    @classmethod
+    def load_env(cls) -> dict[str, str]:
+        """Load etcdctl environment variables from the env file.
 
-def pick_oldest_request(locks: list[Lock]) -> Lock | None:
-    """Choose the lock with the oldest head operation."""
-    selected = None
-    oldest_request = None
+        Parses the generated environment file and extracts ETCDCTL_*
+        variables so they can be injected into subprocess environments.
 
-    for lock in locks:
-        timestamp = lock.get_requested_at()
+        Returns:
+            A dictionary containing environment variables to pass to
+            subprocess calls.
 
-        if oldest_request is None or timestamp < oldest_request:
-            oldest_request = timestamp
-            selected = lock
+        Raises:
+            RollingOpsEtcdNotConfiguredError: If the environment file does not exist.
+        """
+        cls.ensure_initialized()
 
-    return selected
+        env = os.environ.copy()
+
+        for line in cls.ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+
+            if not line.startswith("ETCDCTL_"):
+                continue
+
+            key, value = line.split("=", 1)
+            env[key] = value.strip().strip('"').strip("'")
+
+        env.setdefault("ETCDCTL_API", "3")
+        return env
+
+    @classmethod
+    def ensure_initialized(cls):
+        """Checks whether the environment file for etcdctl is setup."""
+        if not cls.ENV_FILE.exists():
+            raise RollingOpsEtcdNotConfiguredError(
+                f"etcdctl env file does not exist: {cls.ENV_FILE}"
+            )
+
+    @classmethod
+    def run(
+        cls, args: list[str], check: bool = True, capture: bool = True
+    ) -> subprocess.CompletedProcess:
+        """Execute an etcdctl command.
+
+        Args:
+            args: List of arguments to pass to etcdctl.
+            check: If True, raise an exception on non-zero exit status.
+            capture: Whether to capture stdout and stderr.
+
+        Returns:
+            A CompletedProcess object containing the result.
+        """
+        cls.ensure_initialized()
+        cmd = ["etcdctl", *args]
+        return subprocess.run(
+            cmd, env=cls.load_env(), check=check, text=True, capture_output=capture
+        )
+
+    @classmethod
+    def get_first_key_value(cls, key_prefix: str) -> tuple[str, dict] | None:
+        """Retrieve the first key and value under a given prefix.
+
+        Args:
+            key_prefix: Key prefix to search for.
+
+        Returns:
+            A tuple containing:
+            - The key string
+            - The parsed JSON value as a dictionary
+
+            Returns None if no key exists or the command fails.
+        """
+        res = cls.run(
+            ["get", key_prefix, "--prefix", "--limit=1"],
+            check=False,
+        )
+
+        if res.returncode != 0:
+            return None
+
+        out = res.stdout.strip().splitlines()
+        if len(out) < 2:
+            return None
+
+        return out[0], json.loads(out[1])
+
+    @classmethod
+    def get_last_key_value(cls, key_prefix: str) -> tuple[str, dict] | None:
+        """Retrieve the last key and value under a given prefix.
+
+        Args:
+            key_prefix: Key prefix to search for.
+
+        Returns:
+            A tuple containing:
+            - The key string
+            - The parsed JSON value as a dictionary
+
+            Returns None if no key exists or the command fails.
+        """
+        res = cls.run(
+            ["get", key_prefix, "--prefix", "--sort-by=KEY", "--order=DESCEND", "--limit=1"],
+            check=False,
+        )
+        if res.returncode != 0:
+            return None
+        out = res.stdout.strip().splitlines()
+        if len(out) < 2:
+            return None
+
+        return out[0], json.loads(out[1])
+
+    @classmethod
+    def txn(cls, txn: str) -> bool:
+        """Execute an etcd transaction.
+
+        The transaction string should follow the etcdctl transaction format
+        where comparison statements are followed by operations.
+
+        Args:
+            txn: The transaction specification passed to `etcdctl txn`.
+
+        Returns:
+            True if the transaction succeeded, otherwise False.
+        """
+        cls.ensure_initialized()
+        res = subprocess.run(
+            ["bash", "-lc", f"printf %s '{txn}' | etcdctl txn"],
+            text=True,
+            env=cls.load_env(),
+            capture_output=True,
+            check=False,
+        )
+
+        logger.debug("etcd txn result: %s", res.stdout)
+        return "SUCCESS" in res.stdout
 
 
 class RollingOpsLockGrantedEvent(EventBase):
     """Custom event emitted when the background worker grants the lock."""
 
 
-class RollingOpsManagerV1(Object):
-    """Emitters and handlers for rolling ops."""
+class EtcdRollingOpsManager(Object):
+    """Rolling ops manager for clusters."""
 
     def __init__(
-        self, charm: CharmBase, relation_name: str, callback_targets: dict[str, Callable]
+        self,
+        charm: CharmBase,
+        peer_relation_name: str,
+        etcd_relation_name: str,
+        cluster_id: str,
+        callback_targets: dict[str, Any],
     ):
         """Register our custom events.
 
         params:
             charm: the charm we are attaching this to.
-            relation_name: the peer relation name from metadata.yaml.
+            peer_relation_name: peer relation used for rolling ops.
+            etcd_relation_name: the relation to integrate with etcd.
+            cluster_id: unique identifier for the cluster
             callback_targets: mapping from callback_id -> callable.
         """
         super().__init__(charm, "rolling-ops-manager")
         self._charm = charm
-        self.relation_name = relation_name
+        self.peer_relation_name = peer_relation_name
+        self.etcd_relation_name = etcd_relation_name
         self.callback_targets = callback_targets
         self.charm_dir = charm.charm_dir
-        self.worker = RollingOpsAsyncWorker(charm, relation_name=relation_name)
+        owner = f"{self.model.uuid}-{self.model.unit.name}".replace("/", "-")
+        self.worker = EtcdRollingOpsAsyncWorker(
+            charm, peer_relation_name=peer_relation_name, owner=owner
+        )
+
+        cert = self._get_client_certificate_from_peer()
+        mtls_cert = cert[0] if cert else None
+
+        self.keys = RollingOpsKeys.for_owner(cluster_id, owner)
+
+        self.etcd = EtcdRequires(
+            charm,
+            relation_name=etcd_relation_name,
+            prefix=self.keys.cluster_prefix,
+            mtls_cert=mtls_cert,
+        )
 
         charm.on.define_event("rollingops_lock_granted", RollingOpsLockGrantedEvent)
 
         self.framework.observe(
-            charm.on[self.relation_name].relation_changed, self._on_relation_changed
+            charm.on[self.peer_relation_name].relation_departed, self._on_relation_departed
         )
         self.framework.observe(
-            charm.on[self.relation_name].relation_departed, self._on_relation_departed
+            charm.on[self.etcd_relation_name].relation_departed, self._on_relation_departed
         )
-        self.framework.observe(charm.on.leader_elected, self._process_locks)
-        self.framework.observe(charm.on.rollingops_lock_granted, self._on_rollingops_lock_granted)
-        self.framework.observe(charm.on.update_status, self._on_rollingops_lock_granted)
+        self.framework.observe(charm.on.rollingops_lock_granted, self._on_rollingop_granted)
+        self.framework.observe(charm.on.update_status, self._on_rollingop_granted)
+        self.framework.observe(charm.on.install, self._on_install)
+        self.framework.observe(self.etcd.on.etcd_ready, self._on_etcd_ready)
+        self.framework.observe(charm.on.leader_elected, self._on_leader_elected)
+        self.framework.observe(
+            charm.on[self.peer_relation_name].relation_changed, self._on_peer_relation_changed
+        )
+        self.framework.observe(charm.on.secret_changed, self._on_secret_changed)
 
     @property
-    def _relation(self) -> Relation | None:
-        return self.model.get_relation(self.relation_name)
+    def _peer_relation(self) -> Relation | None:
+        return self.model.get_relation(self.peer_relation_name)
 
-    def _on_rollingops_lock_granted(self, event: RollingOpsLockGrantedEvent) -> None:
-        if not self._relation:
+    @property
+    def _etcd_relation(self) -> Relation | None:
+        return self.model.get_relation(self.etcd_relation_name)
+
+    def _on_install(self, event) -> None:
+        subprocess.run(["apt-get", "update"], check=True)
+        subprocess.run(["apt-get", "install", "-y", "etcd-client"], check=True)
+
+    def _on_leader_elected(self, event) -> None:
+        self._create_and_share_certificate()
+
+    def _on_etcd_ready(self, event) -> None:
+        """Configure etcd client access when the etcd relation becomes available.
+
+        It retrieves the endpoints and TLS configuration from the relation databags
+        and generates an environment file used by etcdctl commands.
+        """
+        relation = self._etcd_relation
+        if not relation:
             return
-        logger.info("Received a rolling-ops lock granted event.")
-        lock = Lock(self.model, self.relation_name, self.model.unit)
-        if lock.should_run():
-            self._on_run_with_lock()
-            self._process_locks()
+
+        if not self._sync_client_certificate():
+            logger.warning("Shared rollingops client certificate is not available yet")
+            event.defer()
+            return
+
+        endpoints = self.etcd.fetch_relation_field(relation.id, "endpoints")
+        tls_ca = self.etcd.fetch_relation_field(relation.id, "tls-ca")
+
+        if not endpoints:
+            logger.warning("No etcd endpoints yet")
+            return
+
+        client_cert_path, client_key_path = CertificatesManager.client_paths()
+
+        EtcdCtl.write_env_file(
+            endpoints=endpoints,
+            tls_ca_pem=tls_ca or "",
+            client_cert_path=client_cert_path,
+            client_key_path=client_key_path,
+        )
+
+    def _on_secret_changed(self, event):
+        # if event.secret.label == "rollingops-client-cert":
+        #    self._sync_client_certificate()
+        self._sync_client_certificate()
+
+    def _on_peer_relation_changed(self, event) -> None:
+        """React to peer relation changes.
+
+        The leader ensures the shared certificate exists.
+        All units try to persist the shared certificate locally if available.
+        """
+        self._create_and_share_certificate()
+        self._sync_client_certificate()
+
+    def _create_and_share_certificate(self) -> None:
+        """Ensure the application client certificate exists.
+
+        Only the leader generates the certificate and writes it to the peer
+        relation application databag.
+        """
+        relation = self._peer_relation
+
+        if relation is None or not self.model.unit.is_leader():
+            return
+
+        app_data = relation.data[self.model.app]
+        secret_id = app_data.get(SECRET_FIELD)
+        if secret_id:
+            return
+
+        common_name = f"rollingops-{self.model.uuid}-{self.model.app.name}"
+        CertificatesManager.generate(common_name)
+        cert_pem, key_pem = CertificatesManager.load_client_cert_and_key()
+
+        secret = self.model.app.add_secret(
+            {"cert": cert_pem, "key": key_pem},
+        )
+        app_data[SECRET_FIELD] = secret.id
+
+    def _get_client_certificate_from_peer(self) -> tuple[str, str] | None:
+        """Return the client certificate and key from peer app data.
+
+        Returns:
+            A tuple of (certificate_pem, key_pem), or None if not yet available.
+        """
+        relation = self._peer_relation
+        if relation is None:
+            return None
+
+        secret_id = relation.data[self.model.app].get(SECRET_FIELD)
+        if not secret_id:
+            return None
+
+        secret = self.model.get_secret(id=secret_id)
+        content = secret.get_content(refresh=True)
+
+        return content["cert"], content["key"]
+
+    def _sync_client_certificate(self) -> bool:
+        """Persist the shared client certificate locally on this unit.
+
+        Returns:
+            True if the shared certificate was available and written locally,
+            otherwise False.
+        """
+        shared = self._get_client_certificate_from_peer()
+        if shared is None:
+            logger.debug("Shared rollingops client certificate is not available yet")
+            return False
+
+        cert_pem, key_pem = shared
+        if CertificatesManager.has_client_cert_and_key(cert_pem, key_pem):
+            return True
+
+        CertificatesManager.persist_client_cert_and_key(cert_pem, key_pem)
+        return True
+
+    def _on_rollingop_granted(self, event: RollingOpsLockGrantedEvent) -> None:
+        if not self._peer_relation or not self._etcd_relation:
+            return
+        try:
+            EtcdCtl.ensure_initialized()
+        except RollingOpsEtcdNotConfiguredError:
+            return
+        logger.info("Received a rolling-op lock granted event.")
+        self._on_run_with_lock()
 
     def _on_relation_departed(self, event: RelationDepartedEvent) -> None:
-        """Leader cleanup: if a departing unit was granted a lock, clear the grant.
+        """Leader cleanup: if a departing unit was granted, clear the grant.
 
         This prevents deadlocks when the granted unit leaves the relation.
         """
-        if not self.model.unit.is_leader():
-            return
-        if unit := event.departing_unit:
-            lock = Lock(self.model, self.relation_name, unit)
-            if lock.is_granted():
-                lock.release()
-                self._process_locks()
-
-    def _on_relation_changed(self, _: RelationChangedEvent) -> None:
-        """Process relation changed."""
-        if self.model.unit.is_leader():
-            self._process_locks()
-            return
-
-        lock = Lock(self.model, self.relation_name, self.model.unit)
-        if lock.should_run():
-            self._on_run_with_lock()
-
-    def _valid_peer_unit_names(self) -> set[str]:
-        """Return all unit names currently participating in the peer relation."""
-        if not self._relation:
-            return set()
-        names = {u.name for u in self._relation.units}
-        names.add(self.model.unit.name)
-        return names
-
-    def _release_stale_grant(self) -> None:
-        """Ensure granted_unit refers to a unit currently on the peer relation."""
-        if not self._relation:
-            return
-
-        granted_unit = self._relation.data[self.model.app].get("granted_unit", "")
-        if not granted_unit:
-            return
-
-        valid_units = self._valid_peer_unit_names()
-        if granted_unit not in valid_units:
-            logger.warning(
-                "granted_unit=%s is not in current peer units; releasing stale grant.",
-                granted_unit,
-            )
-            self._relation.data[self.model.app].update({"granted_unit": "", "granted_at": ""})
-
-    def _process_locks(self, _: EventBase | None = None) -> None:
-        """Process locks."""
-        if not self.model.unit.is_leader():
-            return
-
-        for lock in LockIterator(self.model, self.relation_name):
-            if lock.should_release():
-                lock.release()
-                break
-
-        self._release_stale_grant()
-        granted_unit = self._relation.data[self.model.app].get("granted_unit", "")
-
-        if granted_unit:
-            logger.info("Current granted_unit=%s. No new unit will be scheduled.", granted_unit)
-            return
-
-        self._schedule()
-
-    def _schedule(self) -> None:
-        logger.info("Starting scheduling.")
-
-        pending_requests = []
-        pending_retries = []
-
-        for lock in LockIterator(self.model, self.relation_name):
-            if lock.is_retry_hold():
-                self._grant_lock(lock)
-                return
-            if lock.is_waiting():
-                pending_requests.append(lock)
-
-            elif lock.is_waiting_retry():
-                pending_retries.append(lock)
-
-        selected = None
-        if pending_requests:
-            selected = pick_oldest_request(pending_requests)
-        elif pending_retries:
-            selected = pick_oldest_completed(pending_retries)
-
-        if not selected:
-            logger.info("No pending lock requests. Lock was not granted to any unit.")
-            return
-
-        self._grant_lock(selected)
-
-    def _grant_lock(self, selected: Lock) -> None:
-        selected.grant()
-        logger.info("Lock granted to unit=%s.", selected.unit.name)
-        if selected.unit == self.model.unit:
-            if selected.is_retry():
-                self.worker.start()
-                return
-            self._on_run_with_lock()
-            self._process_locks()
+        unit = event.departing_unit
+        if unit == self.model.unit:
+            self.worker.stop()
 
     def request_async_lock(
         self,
@@ -816,117 +681,102 @@ class RollingOpsManagerV1(Object):
         kwargs: dict[str, Any] | None = None,
         max_retry: int | None = None,
     ) -> None:
-        """Enqueue a rolling operation and request the distributed lock.
+        """Queue a rolling operation and trigger asynchronous lock acquisition.
 
-        This method appends an operation (identified by callback_id and kwargs) to the
-        calling unit's FIFO queue stored in the peer relation databag and marks the unit as
-        requesting the lock. It does not execute the operation directly.
+        This method creates a new operation representing a callback to execute
+        once the distributed lock is granted. The operation is appended to the
+        unit's pending operation queue stored in etcd.
+
+        If the operation is successfully enqueued, the background worker process
+        responsible for acquiring the distributed lock and processing operations
+        is started.
 
         Args:
-            callback_id: Identifier for the callback to execute when this unit is granted
-                the lock. Must be a non-empty string and must exist in the manager's
-                callback registry.
-            kwargs: Keyword arguments to pass to the callback when executed. If omitted,
-                an empty dict is used. Must be JSON-serializable because it is stored
-                in Juju relation databags.
-            max_retry: Retry limit for this operation. None means unlimited retries.
-                0 means no retries (drop immediately on first failure). Must be >= 0
-                when provided.
+            callback_id: Identifier of the registered callback to execute when
+                the lock is granted.
+            kwargs: Optional keyword arguments passed to the callback when
+                executed. Must be JSON-serializable.
+            max_retry: Maximum number of retries for the operation.
+                - None: retry indefinitely
+                - 0: do not retry on failure
 
         Raises:
-            RollingOpsInvalidLockRequestError: If any input is invalid (e.g. unknown callback_id,
-                non-dict kwargs, non-serializable kwargs, negative max_retry).
-            RollingOpsNoRelationError: If the peer relation does not exist.
+            ValueError: If the callback_id is not registered or invalid parameters
+            RollingOpsNoEtcdRelationError: if the etcd relation does not exist
+            RollingOpsEtcdNotConfiguredError: if etcd client has not been configured yet
         """
         if callback_id not in self.callback_targets:
-            raise RollingOpsInvalidLockRequestError(f"Unknown callback_id: {callback_id}")
+            raise ValueError(f"Unknown callback_id: {callback_id}")
 
-        try:
-            lock = Lock(self.model, self.relation_name, self.model.unit)
-            lock.request(callback_id, kwargs, max_retry)
+        etcd_relation = self.model.get_relation(self.etcd_relation_name)
+        if not etcd_relation:
+            raise RollingOpsNoEtcdRelationError
 
-        except (RollingOpsDecodingError, ValueError) as e:
-            logger.error("Failed operation: %s", e)
-            raise RollingOpsInvalidLockRequestError(f"Failed to create the lock request: {e}")
-        except RollingOpsNoRelationError as e:
-            logger.debug("No %s peer relation yet.", self.relation_name)
-            raise e
+        EtcdCtl.ensure_initialized()
 
-        if self.model.unit.is_leader():
-            self._process_locks()
+        self.worker.start()
 
     def _on_run_with_lock(self) -> None:
-        """Execute the current head operation if this unit holds the distributed lock.
+        """Execute the current operation while holding the distributed lock.
 
-        - If this unit does not currently hold the lock grant, no operation is run.
-        - If this unit holds the grant but has no queued operation, lock is released.
-        - Otherwise, the operation's callback is looked up by `callback_id` and
-            invoked with the operation kwargs.
+        This method is triggered when the worker determines that the current
+        unit owns the distributed lock. The method retrieves the head operation
+        from the in-progress queue and executes its registered callback.
+
+        After execution, the operation is moved to the completed queue and its
+        updated state is persisted.
         """
-        lock = Lock(self.model, self.relation_name, self.model.unit)
+        EtcdCtl.run(["put", self.keys.lock_key, self.keys.owner])
 
-        if not lock.is_granted():
-            logger.debug("Lock is not granted. Operation will not run.")
-            return
-        operation = lock.get_current_operation()
-        if not operation:
-            logger.debug("There is no operation to run.")
-            lock.complete()
-            return
-        callback = self.callback_targets.get(operation.callback_id, "")
-        if not callback:
-            logger.warning(
-                "Operation %s target was not found. It cannot be executed.",
-                operation.callback_id,
-            )
-            return
-        logger.debug(
-            "Executing callback_id=%s, attempt=%s", operation.callback_id, operation.attempt
-        )
-        try:
-            result = callback(**operation.kwargs)
-        except Exception as e:
-            logger.error("Operation failed: %s: %s", operation.callback_id, e)
-            result = OperationResult.RETRY_RELEASE
+        proc = EtcdCtl.run(["get", self.keys.lock_key, "--print-value-only"], check=False)
 
-        match result:
-            case OperationResult.RETRY_HOLD:
-                logger.info(
-                    "Finished %s. Operation will be retried immediately.", operation.callback_id
-                )
-                lock.retry_hold()
+        if proc.returncode != 0:
+            return False
 
-            case OperationResult.RETRY_RELEASE:
-                logger.info("Finished %s. Operation will be retried later.", operation.callback_id)
-                lock.retry_release()
-
-            case _:
-                logger.info("Finished %s. Lock will be released.", operation.callback_id)
-                lock.complete()
+        value = proc.stdout.strip()
+        if value != self.keys.owner:
+            logger.info("Callback not executed.")
+    
+        callback = self.callback_targets.get("_restart", "")
+        callback(delay=1)
 
 
-class RollingOpsAsyncWorker(Object):
+class EtcdRollingOpsAsyncWorker(Object):
     """Spawns and manages the external rolling-ops worker process."""
 
-    def __init__(self, charm: CharmBase, relation_name: str):
-        super().__init__(charm, "rollingops-async-worker")
+    def __init__(self, charm: CharmBase, peer_relation_name: str, owner: str):
+        super().__init__(charm, "etcd-ollingops-async-worker")
         self._charm = charm
-        self._peers_name = relation_name
+        self._peer_relation_name = peer_relation_name
         self._run_cmd = "/usr/bin/juju-exec"
+        self._owner = owner
+        self._charm_dir = charm.charm_dir
 
     @property
-    def _relation(self) -> Relation:
-        return self._charm.model.get_relation(self._peers_name)
+    def _relation(self):
+        return self.model.get_relation(self._peer_relation_name)
 
     @property
-    def _app_data(self) -> dict:
-        return self._relation.data[self.model.app]
+    def _unit_data(self):
+        return self._relation.data[self.model.unit]
 
     def start(self) -> None:
         """Start a new worker process."""
         if self._relation is None:
             return
-        self.stop()
+
+        pid_str = self._unit_data.get("etcd-rollingops-worker-pid", "")
+        if pid_str:
+            try:
+                pid = int(pid_str)
+            except ValueError:
+                pid = -1
+
+            if self._is_pid_alive(pid):
+                logger.info(
+                    "RollingOps worker already running with PID %s; not starting a new one.", pid
+                )
+                return
 
         # Remove JUJU_CONTEXT_ID so juju-run works from the spawned process
         new_env = os.environ.copy()
@@ -946,7 +796,7 @@ class RollingOpsAsyncWorker(Object):
                 new_env["PYTHONPATH"] = f"{venv_path.resolve()}:{new_env['PYTHONPATH']}"
                 break
 
-        worker = self._charm.charm_dir / "lib/charms/rolling_ops/v1" / "rollingops.py"
+        worker = self._charm_dir / "lib/charms/rolling_ops/v3" / "rollingops.py"
 
         pid = subprocess.Popen(
             [
@@ -956,35 +806,48 @@ class RollingOpsAsyncWorker(Object):
                 "--run-cmd",
                 self._run_cmd,
                 "--unit-name",
-                self._charm.model.unit.name,
+                self.model.unit.name,
                 "--charm-dir",
-                str(self._charm.charm_dir),
+                str(self._charm_dir),
+                "--owner",
+                self._owner,
             ],
-            cwd=str(self._charm.charm_dir),
-            stdout=open("/var/log/rollingops_worker.log", "a"),
-            stderr=subprocess.STDOUT,
+            cwd=str(self._charm_dir),
+            stdout=open("/var/log/etcd_rollingops_worker.log", "a"),
+            stderr=open("/var/log/etcd_rollingops_worker.err", "a"),
             env=new_env,
         ).pid
 
-        self._app_data.update({"rollingops-worker-pid": str(pid)})
-        logger.info("Started RollingOps worker process with PID %s", pid)
+        self._unit_data.update({"etcd-rollingops-worker-pid": str(pid)})
+        logger.info("Started etcd rollingops worker process with PID %s", pid)
+
+    def _is_pid_alive(self, pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
 
     def stop(self) -> None:
         """Stop the running worker process if it exists."""
         if self._relation is None:
             return
-        pid_str = self._app_data.get("rollingops-worker-pid", "")
+        pid_str = self._unit_data.get("etcd-rollingops-worker-pid", "")
         if not pid_str:
             return
 
         pid = int(pid_str)
         try:
             os.kill(pid, signal.SIGINT)
-            logger.info("Stopped RollingOps worker process PID %s", pid)
+            logger.info("Stopped etcd rollingops worker process PID %s", pid)
         except OSError:
-            logger.info("Failed to stop RollingOps worker process PID %s", pid)
+            logger.info("Failed to stop etcd rollingops worker process PID %s", pid)
             pass
-        self._app_data.update({"rollingops-worker-pid": ""})
+        self._unit_data.update({"etcd-rollingops-worker-pid": ""})
 
 
 def main():
@@ -993,10 +856,11 @@ def main():
     parser.add_argument("--run-cmd", required=True)
     parser.add_argument("--unit-name", required=True)
     parser.add_argument("--charm-dir", required=True)
+    parser.add_argument("--owner", required=True)
     args = parser.parse_args()
 
-    # Sleep so that the leader unit can properly leave the hook and start a new one
     time.sleep(10)
+
     dispatch_sub_cmd = (
         f"JUJU_DISPATCH_PATH=hooks/rollingops_lock_granted {args.charm_dir}/dispatch"
     )

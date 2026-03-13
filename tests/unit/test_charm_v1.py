@@ -1,4 +1,4 @@
-# Copyright 2026 Canonical Ltd.
+# Copyright 2022 Canonical Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,818 +14,316 @@
 #
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 
-import json
-from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from charms.rolling_ops.v1.rollingops import (
-    LockIntent,
-    Operation,
-    OperationQueue,
-    RollingOpsDecodingError,
-    RollingOpsInvalidLockRequestError,
-    _now_timestamp_str,
+    SECRET_FIELD,
+    CertificatesManager,
+    EtcdCtl,
+    RollingOpsEtcdNotConfiguredError,
+    RollingOpsKeys,
 )
-from ops.testing import Context, PeerRelation, State
+from ops.testing import Context, PeerRelation, Secret, State
 
 from tests.charms.v1.src.charm import CharmRollingOpsCharmV1
 
 
-def _decode_queue_string(queue_str: str) -> list[dict]:
-    """Helper: decode OperationQueue.to_string() -> list of dicts."""
-    items = json.loads(queue_str)
-    assert isinstance(items, list)
-    return [json.loads(s) for s in items]
+def test_rollingopskeys_paths() -> None:
+    keys = RollingOpsKeys.for_owner("cluster-a", "unit-1")
+
+    assert keys.cluster_prefix == "/rollingops/cluster-a"
+    assert keys._owner_prefix == "/rollingops/cluster-a/unit-1"
+    assert keys.lock_key == "/rollingops/cluster-a/granted-unit"
+    assert keys.pending == "/rollingops/cluster-a/unit-1/pending/"
+    assert keys.inprogress == "/rollingops/cluster-a/unit-1/inprogress/"
+    assert keys.completed == "/rollingops/cluster-a/unit-1/completed/"
 
 
-def _unit_databag(state: State, peer: PeerRelation) -> dict:
-    rel = state.get_relation(peer.id)
-    return rel.local_unit_data
+def test_rollingopskeys_lock_key_is_shared_within_cluster() -> None:
+    k1 = RollingOpsKeys.for_owner("cluster-a", "unit-1")
+    k2 = RollingOpsKeys.for_owner("cluster-a", "unit-2")
+
+    assert k1.lock_key == k2.lock_key
+    assert k1.pending != k2.pending
+    assert k1.inprogress != k2.inprogress
+    assert k1.completed != k2.completed
 
 
-def _app_databag(state: State, peer: PeerRelation) -> dict:
-    rel = state.get_relation(peer.id)
-    return rel.local_app_data
+@pytest.fixture
+def temp_cert_manager(tmp_path):
+    class TestCertificatesManager(CertificatesManager):
+        BASE_DIR = tmp_path / "tls"
+        CA_KEY = BASE_DIR / "client-ca.key"
+        CA_CERT = BASE_DIR / "client-ca.pem"
+        CLIENT_KEY = BASE_DIR / "client.key"
+        CLIENT_CERT = BASE_DIR / "client.pem"
+
+    TestCertificatesManager.BASE_DIR.mkdir(parents=True, exist_ok=True)
+    return TestCertificatesManager
 
 
-def _make_operation_queue(callback_id: str, kwargs: dict, max_retry: int | None) -> OperationQueue:
-    q = OperationQueue()
-    q.enqueue_lock_request(callback_id=callback_id, kwargs=kwargs, max_retry=max_retry)
-    return q
+def test_certificates_manager_exists_returns_false_when_no_files(temp_cert_manager) -> None:
+    assert temp_cert_manager.exists() is False
 
 
-def test_operation_create_sets_fields():
-    op = Operation.create("restart", {"b": 2, "a": 1}, max_retry=3)
+def test_certificates_manager_exists_returns_true_when_all_files_exist(temp_cert_manager) -> None:
+    temp_cert_manager.CA_KEY.write_text("ca-key")
+    temp_cert_manager.CA_CERT.write_text("ca-cert")
+    temp_cert_manager.CLIENT_KEY.write_text("client-key")
+    temp_cert_manager.CLIENT_CERT.write_text("client-cert")
 
-    assert op.kwargs == {"b": 2, "a": 1}
-    assert op.callback_id == "restart"
-    assert op.max_retry == 3
-    assert isinstance(op.requested_at, datetime)
+    assert temp_cert_manager.exists() is True
 
 
-def test_operation_to_string_contains_string_values_only():
-    ts = datetime(2026, 2, 23, 12, 0, 0, 123456, tzinfo=timezone.utc)
-    op = Operation(
-        callback_id="cb", kwargs={"b": 2, "a": 1}, requested_at=ts, max_retry=None, attempt=0
+def test_certificates_manager_load_cert_and_key(temp_cert_manager) -> None:
+    temp_cert_manager.CLIENT_CERT.write_text("client-cert-pem")
+    temp_cert_manager.CLIENT_KEY.write_text("client-key-pem")
+
+    cert_pem, key_pem = temp_cert_manager.load_client_cert_and_key()
+
+    assert cert_pem == "client-cert-pem"
+    assert key_pem == "client-key-pem"
+
+
+def test_certificates_manager_client_paths(temp_cert_manager) -> None:
+    cert_path, key_path = temp_cert_manager.client_paths()
+
+    assert cert_path == temp_cert_manager.CLIENT_CERT
+    assert key_path == temp_cert_manager.CLIENT_KEY
+
+
+def test_certificates_manager_persist_client_cert_and_key_writes_files(
+    temp_cert_manager,
+) -> None:
+
+    temp_cert_manager.persist_client_cert_and_key("cert-pem", "key-pem")
+
+    assert temp_cert_manager.CLIENT_CERT.read_text() == "cert-pem"
+    assert temp_cert_manager.CLIENT_KEY.read_text() == "key-pem"
+
+
+def test_certificates_manager_has_client_cert_and_key_returns_false_when_files_missing(
+    temp_cert_manager,
+) -> None:
+    assert temp_cert_manager.has_client_cert_and_key("cert", "key") is False
+
+
+def test_certificates_manager_has_client_cert_and_key_returns_true_when_material_matches(
+    temp_cert_manager,
+) -> None:
+    temp_cert_manager.CLIENT_CERT.write_text("cert-pem")
+    temp_cert_manager.CLIENT_KEY.write_text("key-pem")
+
+    assert temp_cert_manager.has_client_cert_and_key("cert-pem", "key-pem") is True
+
+
+def test_certificates_manager_has_client_cert_and_key_returns_false_when_material_differs(
+    temp_cert_manager,
+) -> None:
+    temp_cert_manager.CLIENT_CERT.write_text("cert-pem")
+    temp_cert_manager.CLIENT_KEY.write_text("key-pem")
+
+    assert temp_cert_manager.has_client_cert_and_key("other-cert", "key-pem") is False
+    assert temp_cert_manager.has_client_cert_and_key("cert-pem", "other-key") is False
+
+
+def test_certificates_manager_generate_does_nothing_when_files_already_exist(
+    temp_cert_manager,
+) -> None:
+    temp_cert_manager.CA_KEY.write_text("existing-ca-key")
+    temp_cert_manager.CA_CERT.write_text("existing-ca-cert")
+    temp_cert_manager.CLIENT_KEY.write_text("existing-client-key")
+    temp_cert_manager.CLIENT_CERT.write_text("existing-client-cert")
+
+    temp_cert_manager.generate(common_name="unit-1")
+
+    assert temp_cert_manager.CA_KEY.read_text() == "existing-ca-key"
+    assert temp_cert_manager.CA_CERT.read_text() == "existing-ca-cert"
+    assert temp_cert_manager.CLIENT_KEY.read_text() == "existing-client-key"
+    assert temp_cert_manager.CLIENT_CERT.read_text() == "existing-client-cert"
+
+
+def test_certificates_manager_generate_creates_all_files(
+    temp_cert_manager,
+) -> None:
+
+    temp_cert_manager.generate(common_name="unit-1")
+    assert temp_cert_manager.exists() is True
+
+    assert temp_cert_manager.CA_KEY.read_text().startswith("-----BEGIN RSA PRIVATE KEY-----")
+    assert temp_cert_manager.CA_CERT.read_text().startswith("-----BEGIN CERTIFICATE-----")
+    assert temp_cert_manager.CLIENT_KEY.read_text().startswith("-----BEGIN RSA PRIVATE KEY-----")
+    assert temp_cert_manager.CLIENT_CERT.read_text().startswith("-----BEGIN CERTIFICATE-----")
+
+
+@pytest.fixture
+def temp_etcdctl(tmp_path):
+    class TestEtcdCtl(EtcdCtl):
+        BASE_DIR = tmp_path / "etcd"
+        SERVER_CA = BASE_DIR / "server-ca.pem"
+        ENV_FILE = BASE_DIR / "etcdctl.env"
+
+    return TestEtcdCtl
+
+
+def test_etcdctl_write_env_file_creates_dir_files(temp_etcdctl) -> None:
+
+    client_cert = Path("/tmp/client.pem")
+    client_key = Path("/tmp/client.key")
+
+    temp_etcdctl.write_env_file(
+        endpoints="https://10.0.0.1:2379,https://10.0.0.2:2379",
+        tls_ca_pem="CA-PEM",
+        client_cert_path=client_cert,
+        client_key_path=client_key,
     )
 
-    s = op.to_string()
-    obj = json.loads(s)
+    assert temp_etcdctl.BASE_DIR.exists()
+    assert temp_etcdctl.SERVER_CA.read_text() == "CA-PEM"
 
-    assert obj["callback_id"] == "cb"
-    assert obj["kwargs"] == '{"a":1,"b":2}'
-    assert obj["requested_at"] == ts.isoformat()
-    assert obj.get("max_retry", "") == ""
+    env_text = temp_etcdctl.ENV_FILE.read_text()
+    assert 'export ETCDCTL_API="3"' in env_text
+    assert 'export ETCDCTL_ENDPOINTS="https://10.0.0.1:2379,https://10.0.0.2:2379"' in env_text
+    assert f'export ETCDCTL_CACERT="{temp_etcdctl.SERVER_CA}"' in env_text
+    assert 'export ETCDCTL_CERT="/tmp/client.pem"' in env_text
+    assert 'export ETCDCTL_KEY="/tmp/client.key"' in env_text
 
 
-def test_operation_to_string_contains_string_values_only_zero_max_retry():
-    ts = datetime(2026, 2, 23, 12, 0, 0, 123456, tzinfo=timezone.utc)
-    op = Operation(
-        callback_id="cb", kwargs={"b": 2, "a": 1}, requested_at=ts, max_retry=0, attempt=0
+def test_etcdctl_ensure_initialized_raises_when_env_missing(temp_etcdctl) -> None:
+    with pytest.raises(RollingOpsEtcdNotConfiguredError):
+        temp_etcdctl.ensure_initialized()
+
+
+def test_etcdctl_load_env_parses_exported_vars(temp_etcdctl) -> None:
+    temp_etcdctl.BASE_DIR.mkdir(parents=True, exist_ok=True)
+    temp_etcdctl.ENV_FILE.write_text(
+        "\n".join([
+            "# comment",
+            'export ETCDCTL_API="3"',
+            'export ETCDCTL_ENDPOINTS="https://10.0.0.1:2379"',
+            "export ETCDCTL_CERT='/tmp/client.pem'",
+            'export ETCDCTL_KEY="/tmp/client.key"',
+            'export ETCDCTL_CACERT="/tmp/server-ca.pem"',
+            "",
+        ])
     )
 
-    s = op.to_string()
-    obj = json.loads(s)
+    with patch.dict("os.environ", {"EXISTING_VAR": "present"}, clear=True):
+        env = temp_etcdctl.load_env()
 
-    assert obj["callback_id"] == "cb"
-    assert obj["kwargs"] == '{"a":1,"b":2}'
-    assert obj["requested_at"] == ts.isoformat()
-    assert obj.get("max_retry", "") == "0"
-
-
-def test_operation_is_max_retry_reached_on_zero_max_retry():
-    op = Operation.create("restart", {"a": 1, "b": 2}, max_retry=0)
-    assert not op.is_max_retry_reached()
-    op.increase_attempt()
-    assert op.is_max_retry_reached()
+    assert env["EXISTING_VAR"] == "present"
+    assert env["ETCDCTL_API"] == "3"
+    assert env["ETCDCTL_ENDPOINTS"] == "https://10.0.0.1:2379"
+    assert env["ETCDCTL_CERT"] == "/tmp/client.pem"
+    assert env["ETCDCTL_KEY"] == "/tmp/client.key"
+    assert env["ETCDCTL_CACERT"] == "/tmp/server-ca.pem"
 
 
-def test_operation_equality_and_hash_ignore_timestamp_and_max_retry():
-    # Equality only depends on (callback_id, kwargs)
-    op1 = Operation.create("restart", {"a": 1, "b": 2}, max_retry=0)
-    op2 = Operation.create("restart", {"b": 2, "a": 1}, max_retry=999)
-
-    assert op1 == op2
-    assert hash(op1) == hash(op2)
-
-    op3 = Operation.create("restart", {"a": 2}, max_retry=0)
-    assert op1 != op3
-
-
-def test_operation_equality_and_hash_empty_arguments():
-    # Equality only depends on (callback_id, kwargs)
-    op1 = Operation.create("restart", {}, max_retry=0)
-    op2 = Operation.create("restart", {}, max_retry=999)
-
-    assert op1 == op2
-    assert hash(op1) == hash(op2)
-
-    op3 = Operation.create("restart", {"a": 2}, max_retry=0)
-    assert op1 != op3
-
-
-def test_operation_to_string_and_from_string():
-    ts = datetime(2026, 2, 23, 12, 0, 0, 0, tzinfo=timezone.utc)
-    op1 = Operation(
-        callback_id="cb", kwargs={"x": 1, "y": "z"}, requested_at=ts, max_retry=5, attempt=0
-    )
-
-    s = op1.to_string()
-    op2 = Operation.from_string(s)
-
-    assert op2.callback_id == op1.callback_id
-    assert op2.kwargs == op1.kwargs
-    assert op2.requested_at == op1.requested_at
-    assert op2.max_retry == op1.max_retry
-    assert op2.attempt == op1.attempt
-
-
-def test_operation_from_string_valid_payload():
-    requested_at = datetime(2026, 3, 12, 10, 30, 45, 123456, tzinfo=timezone.utc)
-    payload = json.dumps({
-        "callback_id": "cb-123",
-        "kwargs": json.dumps({"b": 2, "a": "x"}),
-        "requested_at": requested_at.isoformat(),
-        "max_retry": "5",
-        "attempt": "2",
-    })
-
-    op = Operation.from_string(payload)
-
-    assert op is not None
-    assert op.callback_id == "cb-123"
-    assert op.kwargs == {"b": 2, "a": "x"}
-    assert op.requested_at == requested_at
-    assert op.max_retry == 5
-    assert op.attempt == 2
-
-
-def test_from_string_valid_payload_with_empty_kwargs_and_no_max_retry():
-    requested_at = datetime(2026, 3, 12, 10, 30, 45, 123456, tzinfo=timezone.utc)
-    payload = json.dumps({
-        "callback_id": "cb-123",
-        "kwargs": "",
-        "requested_at": requested_at.isoformat(),
-        "max_retry": "",
-        "attempt": "0",
-    })
-
-    op = Operation.from_string(payload)
-
-    assert op is not None
-    assert op.callback_id == "cb-123"
-    assert op.kwargs == {}
-    assert op.requested_at == requested_at
-    assert op.max_retry is None
-    assert op.attempt == 0
-
-
-def test_from_string_valid_payload_with_empty_kwargs_and_0_max_retry():
-    requested_at = datetime(2026, 3, 12, 10, 30, 45, 123456, tzinfo=timezone.utc)
-    payload = json.dumps({
-        "callback_id": "cb-123",
-        "kwargs": "{}",
-        "requested_at": requested_at.isoformat(),
-        "max_retry": "0",
-        "attempt": "0",
-    })
-
-    op = Operation.from_string(payload)
-
-    assert op is not None
-    assert op.callback_id == "cb-123"
-    assert op.kwargs == {}
-    assert op.requested_at == requested_at
-    assert op.max_retry == 0
-    assert op.attempt == 0
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        "{not valid json",
-        json.dumps(  # invalid requested_at
-            {
-                "callback_id": "cb-123",
-                "kwargs": json.dumps({"x": 1}),
-                "requested_at": "bad-ts",
-                "max_retry": "3",
-                "attempt": "1",
-            }
+@pytest.fixture
+def certificates_manager_patches():
+    with (
+        patch(
+            "charms.rolling_ops.v1.rollingops.CertificatesManager.exists",
+            return_value=False,
         ),
-        json.dumps(  # invalid kwargs
-            {
-                "callback_id": "cb-123",
-                "kwargs": "{bad kwargs json",
-                "requested_at": datetime.now(timezone.utc).isoformat(),
-                "max_retry": "3",
-                "attempt": "1",
-            }
+        patch(
+            "charms.rolling_ops.v1.rollingops.CertificatesManager.generate",
+            return_value=None,
+        ) as mock_generate,
+        patch(
+            "charms.rolling_ops.v1.rollingops.CertificatesManager.load_client_cert_and_key",
+            return_value=("CERT_PEM", "KEY_PEM"),
         ),
-        json.dumps(  # missing callback_id
-            {
-                "kwargs": json.dumps({"x": 1}),
-                "requested_at": datetime.now(timezone.utc).isoformat(),
-                "max_retry": "3",
-                "attempt": "1",
-            }
+        patch(
+            "charms.rolling_ops.v1.rollingops.CertificatesManager.client_paths",
+            return_value=(Path("/tmp/client.pem"), Path("/tmp/client.key")),
         ),
-        json.dumps(  # invalid kwargs
-            {
-                "callback_id": "cb-123",
-                "kwargs": "[]",
-                "requested_at": datetime.now(timezone.utc).isoformat(),
-                "max_retry": "3",
-                "attempt": "1",
-            }
-        ),
-        json.dumps(  # missing requested_at
-            {
-                "callback_id": "cb-123",
-                "kwargs": "{}",
-                "requested_at": "",
-                "max_retry": "3",
-                "attempt": "1",
-            }
-        ),
-    ],
-)
-def test_operation_from_string_invalid_inputs_return_none(payload):
-    with pytest.raises(RollingOpsDecodingError, match="Failed to deserialize"):
-        Operation.from_string(payload)
-
-
-def test_queue_empty_behaviour():
-    q = OperationQueue()
-
-    assert len(q) == 0
-    assert q.empty is True
-    assert q.peek() is None
-    assert q.dequeue() is None
-
-    assert json.loads(q.to_string()) == []
-
-
-def test_queue_enqueue_and_fifo_order():
-    q = OperationQueue()
-    q.enqueue_lock_request("a", {"i": 1})
-    q.enqueue_lock_request("b", {"i": 2})
-
-    assert len(q) == 2
-    assert q.peek().callback_id == "a"
-
-    first = q.dequeue()
-    assert first.callback_id == "a"
-    assert len(q) == 1
-    assert q.peek().callback_id == "b"
-
-    second = q.dequeue()
-    assert second.callback_id == "b"
-    assert q.empty is True
-
-
-def test_queue_deduplicates_only_against_last_item():
-    q = OperationQueue()
-
-    q.enqueue_lock_request("restart", {"x": 1})
-    assert len(q) == 1
-
-    q.enqueue_lock_request("restart", {"x": 1})
-    assert len(q) == 1
-
-    q.enqueue_lock_request("restart", {"x": 2})
-    assert len(q) == 2
-
-    q.enqueue_lock_request("restart", {"x": 1})
-    assert len(q) == 3
-
-
-def test_queue_to_string_and_from_string():
-    q1 = OperationQueue()
-    q1.enqueue_lock_request("a", {"x": 1}, max_retry=5)
-    q1.enqueue_lock_request("b", {"y": "z"}, max_retry=None)
-
-    encoded = q1.to_string()
-    q2 = OperationQueue.from_string(encoded)
-
-    assert len(q2) == 2
-    assert q2.peek().callback_id == "a"
-    assert q2.dequeue().callback_id == "a"
-    assert q2.dequeue().callback_id == "b"
-    assert q2.empty
-
-
-def test_queue_from_string_empty_string_is_empty_queue():
-    q = OperationQueue.from_string("")
-    assert q.empty
-    assert q.peek() is None
-
-
-def test_queue_from_string_rejects_non_list_json():
-    with pytest.raises(RollingOpsDecodingError, match="OperationQueue string"):
-        OperationQueue.from_string(json.dumps({"not": "a list"}))
-
-
-def test_queue_from_string_rejects_invalid_jason():
-    with pytest.raises(RollingOpsDecodingError, match="Failed to deserialize data"):
-        OperationQueue.from_string("{invalid")
-
-
-def test_queue_encoding_is_list_of_operation_strings():
-    q = OperationQueue()
-    q.enqueue_lock_request("a", {"x": 1})
-    s = q.to_string()
-
-    decoded = json.loads(s)
-    assert isinstance(decoded, list)
-    assert len(decoded) == 1
-    assert isinstance(decoded[0], str)
-
-    op_dicts = _decode_queue_string(s)
-    assert op_dicts[0]["callback_id"] == "a"
-    assert op_dicts[0]["kwargs"] == '{"x":1}'
-    assert op_dicts[0].get("max_retry", "") == ""
-    assert "requested_at" in op_dicts[0]
-
-
-def test_lock_request_enqueues_and_sets_request(tmp_path):
-    ctx = Context(CharmRollingOpsCharmV1)
-    peer = PeerRelation(endpoint="restart")
-    state_in = State(leader=False, relations={peer})
-
-    trace_file = tmp_path / "transitions.log"
-    with patch(
-        "tests.charms.v1.src.charm.TRACE_FILE",
-        trace_file,
+        patch(
+            "charms.rolling_ops.v1.rollingops.CertificatesManager.persist_client_cert_and_key",
+            return_value=(Path("/tmp/client.pem"), Path("/tmp/client.key")),
+        ) as mock_persit,
     ):
-        state_out = ctx.run(
-            ctx.on.action("restart", params={"delay": 10}),
-            state_in,
-        )
-
-    databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.REQUEST
-    assert databag["operations"]
-
-    q = OperationQueue.from_string(databag["operations"])
-    len(q) == 1
-    operation = q.peek()
-    assert operation.callback_id == "_restart"
-    assert operation.kwargs == {"delay": 10}
-    assert operation.max_retry is None
-    assert operation.requested_at is not None
+        yield {
+            "generate": mock_generate,
+            "persist": mock_persit,
+        }
 
 
-@pytest.mark.parametrize(
-    "max_retry",
-    [
-        (-5),
-        (-1),
-        ("3"),
-    ],
-)
-def test_lock_request_invalid_inputs(max_retry):
+@pytest.fixture
+def etcdctl_patch():
+    with patch("charms.rolling_ops.v1.rollingops.EtcdCtl") as mock_etcdctl:
+        yield mock_etcdctl
+
+
+def test_leader_elected_creates_shared_secret_and_stores_id(
+    certificates_manager_patches, etcdctl_patch
+):
     ctx = Context(CharmRollingOpsCharmV1)
-    peer = PeerRelation(endpoint="restart")
-    state_in = State(leader=False, relations={peer})
+    peer_relation = PeerRelation(endpoint="restart")
 
-    with ctx(ctx.on.update_status(), state_in) as mgr:
-        with pytest.raises(RollingOpsInvalidLockRequestError):
-            mgr.charm.restart_manager.request_async_lock(
-                callback_id="_restart",
-                kwargs={},
-                max_retry=max_retry,
-            )
+    state_in = State(leader=True, relations={peer_relation})
+    state_out = ctx.run(ctx.on.leader_elected(), state_in)
+
+    peer_out = next(r for r in state_out.relations if r.endpoint == "restart")
+    assert SECRET_FIELD in peer_out.local_app_data
+    assert peer_out.local_app_data[SECRET_FIELD].startswith("secret:")
+
+    certificates_manager_patches["generate"].assert_called_once()
 
 
-@pytest.mark.parametrize(
-    "callback_id",
-    [
-        ("",),
-        ("   ",),
-        ("unknown",),
-    ],
-)
-def test_lock_request_invalid_callback_id(callback_id):
+def test_leader_elected_does_not_regenerate_when_secret_already_exists(
+    certificates_manager_patches, etcdctl_patch
+):
     ctx = Context(CharmRollingOpsCharmV1)
-    peer = PeerRelation(endpoint="restart")
-    state_in = State(leader=False, relations={peer})
-
-    with ctx(ctx.on.update_status(), state_in) as mgr:
-        with pytest.raises(RollingOpsInvalidLockRequestError, match="Unknown callback_id"):
-            mgr.charm.restart_manager.request_async_lock(
-                callback_id=callback_id,
-                kwargs={},
-                max_retry=0,
-            )
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        ("nope"),
-        ([]),
-        ({"x": OperationQueue()}),
-    ],
-)
-def test_lock_request_invalid_kwargs(kwargs):
-    ctx = Context(CharmRollingOpsCharmV1)
-    peer = PeerRelation(endpoint="restart")
-    state_in = State(leader=False, relations={peer})
-
-    with ctx(ctx.on.update_status(), state_in) as mgr:
-        with pytest.raises(
-            RollingOpsInvalidLockRequestError, match="Failed to create the lock request"
-        ):
-            mgr.charm.restart_manager.request_async_lock(
-                callback_id="_restart",
-                kwargs=kwargs,
-                max_retry=0,
-            )
-
-
-def test_existing_operation_then_new_request(tmp_path):
-    ctx = Context(CharmRollingOpsCharmV1)
-    queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
-    peer = PeerRelation(
-        endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
+    peer_relation = PeerRelation(
+        endpoint="restart", local_app_data={SECRET_FIELD: "secret:existing"}
     )
-
-    state_in = State(leader=False, relations={peer})
-
-    trace_file = tmp_path / "transitions.log"
-    with patch(
-        "tests.charms.v1.src.charm.TRACE_FILE",
-        trace_file,
-    ):
-        state_out = ctx.run(ctx.on.action("restart", params={"delay": 10}), state_in)
-
-    databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.REQUEST
-    result = OperationQueue.from_string(databag["operations"])
-
-    assert len(result) == 2
-    assert result.operations[0].callback_id == "_failed_restart"
-    assert result.operations[1].callback_id == "_restart"
-
-
-def test_new_request_does_not_overwrite_state_if_queue_not_empty(tmp_path):
-    ctx = Context(CharmRollingOpsCharmV1)
-    queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
-    executed_at = _now_timestamp_str()
-    peer = PeerRelation(
-        endpoint="restart",
-        local_unit_data={
-            "state": LockIntent.RETRY_RELEASE,
-            "executed_at": executed_at,
-            "operations": queue.to_string(),
+    secret = Secret(
+        id="secret:existing",
+        owner="application",
+        tracked_content={
+            "cert": "CERT_PEM",
+            "key": "KEY_PEM",
         },
     )
-    state_in = State(leader=False, relations={peer})
 
-    trace_file = tmp_path / "transitions.log"
-    with patch(
-        "tests.charms.v1.src.charm.TRACE_FILE",
-        trace_file,
-    ):
-        state_out = ctx.run(ctx.on.action("restart", params={"delay": 10}), state_in)
-
-    databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.RETRY_RELEASE
-    assert databag["executed_at"] == executed_at
-    result = OperationQueue.from_string(databag["operations"])
-    assert len(result) == 2
-    assert result.operations[0].callback_id == "_failed_restart"
-    assert result.operations[1].callback_id == "_restart"
-
-
-def test_relation_changed_without_grant_does_not_run_operation():
-    ctx = Context(CharmRollingOpsCharmV1)
-    remote_unit_name = f"{ctx.app_name}/1"
-    queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
-    peer = PeerRelation(
-        endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
-        local_app_data={"granted_unit": remote_unit_name, "granted_at": _now_timestamp_str()},
-    )
-
-    state_in = State(leader=False, relations={peer})
-
-    state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
-
-    databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.REQUEST
-    result = OperationQueue.from_string(databag["operations"])
-    assert len(result) == 1
-    assert databag.get("executed_at", "") == ""
-
-
-def test_lock_complete_pops_head():
-    ctx = Context(CharmRollingOpsCharmV1)
-    remote_unit_name = f"{ctx.app_name}/1"
-    local_unit_name = f"{ctx.app_name}/0"
-    queue = _make_operation_queue(callback_id="_restart", kwargs={}, max_retry=0)
-    peer = PeerRelation(
-        endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
-        local_app_data={"granted_unit": local_unit_name, "granted_at": _now_timestamp_str()},
-    )
-    state_in = State(leader=False, relations={peer})
-
-    state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
-
-    databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.IDLE
-    assert databag["executed_at"] is not None
-    assert databag.get("operations", None) == "[]"
-
-    q = OperationQueue.from_string(databag["operations"])
-    assert len(q) == 0
-
-
-def test_successful_operation_leaves_state_request_when_more_ops_remain(tmp_path):
-    ctx = Context(CharmRollingOpsCharmV1)
-    local_unit_name = f"{ctx.app_name}/0"
-    remote_unit_name = f"{ctx.app_name}/1"
-    queue = OperationQueue()
-    queue.enqueue_lock_request(callback_id="_restart", kwargs={}, max_retry=None)
-    queue.enqueue_lock_request(callback_id="_failed_restart", kwargs={}, max_retry=None)
-
-    peer = PeerRelation(
-        endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
-        local_app_data={"granted_unit": local_unit_name, "granted_at": _now_timestamp_str()},
-    )
-
-    state_in = State(leader=False, relations={peer})
-
-    trace_file = tmp_path / "transitions.log"
-    with patch(
-        "tests.charms.v1.src.charm.TRACE_FILE",
-        trace_file,
-    ):
-        state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
-
-    databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.REQUEST
-    q = OperationQueue.from_string(databag["operations"])
-    assert len(q) == 1
-    current_operation = q.peek()
-    assert current_operation.callback_id == "_failed_restart"
-
-
-@pytest.mark.parametrize(
-    "callback_id, lock_intent",
-    [
-        ("_failed_restart", LockIntent.RETRY_RELEASE),
-        ("_deferred_restart", LockIntent.RETRY_HOLD),
-    ],
-)
-def test_lock_retry_marks_retry(callback_id, lock_intent, tmp_path):
-    ctx = Context(CharmRollingOpsCharmV1)
-    remote_unit_name = f"{ctx.app_name}/1"
-    local_unit_name = f"{ctx.app_name}/0"
-    queue = _make_operation_queue(callback_id=callback_id, kwargs={}, max_retry=3)
-    peer = PeerRelation(
-        endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
-        local_app_data={"granted_unit": local_unit_name, "granted_at": _now_timestamp_str()},
-    )
-    state_in = State(leader=False, relations={peer})
-
-    trace_file = tmp_path / "transitions.log"
-    with patch(
-        "tests.charms.v1.src.charm.TRACE_FILE",
-        trace_file,
-    ):
-        state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
-
-    databag = _unit_databag(state_out, peer)
-    assert databag["state"] == lock_intent
-    assert databag["executed_at"] is not None
-
-    q = OperationQueue.from_string(databag["operations"])
-    assert len(q) == 1
-    current_operation = q.peek()
-    initial_operation = queue.peek()
-    assert current_operation.callback_id == initial_operation.callback_id
-    assert current_operation.kwargs == initial_operation.kwargs
-    assert current_operation.max_retry == initial_operation.max_retry
-    assert current_operation.requested_at == initial_operation.requested_at
-    assert current_operation.attempt == 1
-
-
-@pytest.mark.parametrize(
-    "callback_id",
-    [
-        ("_failed_restart"),
-        ("_deferred_restart"),
-    ],
-)
-def test_lock_retry_drops_when_max_retry_reached(callback_id, tmp_path):
-    ctx = Context(CharmRollingOpsCharmV1)
-    remote_unit_name = f"{ctx.app_name}/1"
-    local_unit_name = f"{ctx.app_name}/0"
-
-    queue = OperationQueue()
-    queue.enqueue_lock_request(callback_id=callback_id, kwargs={}, max_retry=3)
-    queue.peek().increase_attempt()
-    queue.peek().increase_attempt()
-    queue.peek().increase_attempt()
-
-    peer = PeerRelation(
-        endpoint="restart",
-        local_unit_data={"state": LockIntent.REQUEST, "operations": queue.to_string()},
-        local_app_data={"granted_unit": local_unit_name, "granted_at": _now_timestamp_str()},
-    )
-    state_in = State(leader=False, relations={peer})
-
-    trace_file = tmp_path / "transitions.log"
-    with patch(
-        "tests.charms.v1.src.charm.TRACE_FILE",
-        trace_file,
-    ):
-        state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
-
-    databag = _unit_databag(state_out, peer)
-    assert databag["state"] == LockIntent.IDLE
-    assert databag["executed_at"] is not None
-
-    q = OperationQueue.from_string(databag["operations"])
-    assert len(q) == 0
-
-
-def test_lock_grant_and_release(tmp_path):
-    ctx = Context(CharmRollingOpsCharmV1)
-    queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
-    peer = PeerRelation(
-        endpoint="restart",
-        peers_data={1: {"state": LockIntent.REQUEST, "operations": queue.to_string()}},
-    )
-    state_in = State(leader=True, relations={peer})
-
-    trace_file = tmp_path / "transitions.log"
-    with patch(
-        "tests.charms.v1.src.charm.TRACE_FILE",
-        trace_file,
-    ):
-        state = ctx.run(ctx.on.leader_elected(), state_in)
-    databag = _app_databag(state, peer)
-
-    unit_name = f"{ctx.app_name}/1"
-    assert unit_name in databag["granted_unit"]
-    assert databag["granted_at"] is not None
-
-
-def test_scheduling_does_nothing_if_lock_already_granted():
-    ctx = Context(CharmRollingOpsCharmV1)
-    queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
-    remote_unit_name = f"{ctx.app_name}/1"
-    now_timestamp = _now_timestamp_str()
-    peer = PeerRelation(
-        endpoint="restart",
-        peers_data={
-            1: {"state": LockIntent.REQUEST, "operations": queue.to_string()},
-            2: {"state": LockIntent.REQUEST, "operations": queue.to_string()},
-        },
-        local_app_data={"granted_unit": remote_unit_name, "granted_at": now_timestamp},
-    )
-    state_in = State(leader=True, relations={peer})
-
-    state_out = ctx.run(ctx.on.relation_changed(peer, remote_unit=remote_unit_name), state_in)
-
-    databag = _app_databag(state_out, peer)
-    assert databag["granted_unit"] == remote_unit_name
-    assert databag["granted_at"] == now_timestamp
-
-
-def test_schedule_picks_retry_hold():
-    ctx = Context(CharmRollingOpsCharmV1)
-
-    old_operation = _now_timestamp_str()
-    queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
-    new_operation = _now_timestamp_str()
-
-    peer = PeerRelation(
-        endpoint="restart",
-        peers_data={
-            1: {
-                "state": LockIntent.RETRY_RELEASE,
-                "operations": queue.to_string(),
-                "executed_at": new_operation,
-            },
-            2: {
-                "state": LockIntent.REQUEST,
-                "operations": queue.to_string(),
-                "executed_at": old_operation,
-            },
-            3: {
-                "state": LockIntent.RETRY_HOLD,
-                "operations": queue.to_string(),
-                "executed_at": new_operation,
-            },
-        },
-    )
-    state_in = State(leader=True, relations={peer})
+    state_in = State(leader=True, relations={peer_relation}, secrets=[secret])
 
     state_out = ctx.run(ctx.on.leader_elected(), state_in)
 
-    databag = _app_databag(state_out, peer)
-    remote_unit_name = f"{ctx.app_name}/3"
-    assert databag["granted_unit"] == remote_unit_name
+    peer_out = next(r for r in state_out.relations if r.endpoint == "restart")
+    assert peer_out.local_app_data[SECRET_FIELD] == "secret:existing"
+    certificates_manager_patches["generate"].assert_not_called()
 
 
-def test_schedule_picks_oldest_requested_at_among_requests():
+def test_non_leader_does_not_create_shared_secret(certificates_manager_patches, etcdctl_patch):
     ctx = Context(CharmRollingOpsCharmV1)
+    peer_relation = PeerRelation(endpoint="restart")
+    state_in = State(leader=False, relations={peer_relation})
 
-    old_queue = OperationQueue()
-    old_queue.enqueue_lock_request(callback_id="restart", kwargs={}, max_retry=2)
+    state_out = ctx.run(ctx.on.relation_changed(peer_relation, remote_unit=1), state_in)
 
-    new_queue = OperationQueue()
-    new_queue.enqueue_lock_request(callback_id="restart", kwargs={}, max_retry=2)
-
-    peer = PeerRelation(
-        endpoint="restart",
-        peers_data={
-            1: {"state": LockIntent.REQUEST, "operations": new_queue.to_string()},
-            2: {"state": LockIntent.REQUEST, "operations": old_queue.to_string()},
-        },
-    )
-    state_in = State(leader=True, relations={peer})
-
-    state_out = ctx.run(ctx.on.leader_elected(), state_in)
-    databag = _app_databag(state_out, peer)
-    remote_unit_name = f"{ctx.app_name}/2"
-    assert databag["granted_unit"] == remote_unit_name
+    peer_out = next(r for r in state_out.relations if r.endpoint == "restart")
+    assert SECRET_FIELD not in peer_out.local_app_data
+    certificates_manager_patches["generate"].assert_not_called()
 
 
-def test_schedule_picks_oldest_executed_at_among_retries_when_no_requests():
+def test_relation_changed_syncs_local_certificate_from_secret(
+    certificates_manager_patches, etcdctl_patch
+):
     ctx = Context(CharmRollingOpsCharmV1)
-
-    old_operation = _now_timestamp_str()
-    queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
-    new_operation = _now_timestamp_str()
-
-    peer = PeerRelation(
-        endpoint="restart",
-        peers_data={
-            1: {
-                "state": LockIntent.RETRY_RELEASE,
-                "operations": queue.to_string(),
-                "executed_at": new_operation,
-            },
-            2: {
-                "state": LockIntent.RETRY_RELEASE,
-                "operations": queue.to_string(),
-                "executed_at": old_operation,
-            },
-        },
+    peer_relation = PeerRelation(
+        endpoint="restart", local_app_data={SECRET_FIELD: "secret:rollingops-cert"}
     )
-    state_in = State(leader=True, relations={peer})
 
-    state_out = ctx.run(ctx.on.leader_elected(), state_in)
-
-    databag = _app_databag(state_out, peer)
-    remote_unit_name = f"{ctx.app_name}/2"
-    assert databag["granted_unit"] == remote_unit_name
-
-
-def test_schedule_prioritizes_requests_over_retries():
-    ctx = Context(CharmRollingOpsCharmV1)
-    queue = _make_operation_queue(callback_id="_failed_restart", kwargs={}, max_retry=3)
-
-    peer = PeerRelation(
-        endpoint="restart",
-        peers_data={
-            1: {
-                "state": LockIntent.RETRY_RELEASE,
-                "operations": queue.to_string(),
-                "executed_at": _now_timestamp_str(),
-            },
-            2: {"state": LockIntent.REQUEST, "operations": queue.to_string()},
-        },
+    secret = Secret(
+        id="secret:rollingops-cert",
+        tracked_content={"cert": "CERT_PEM", "key": "KEY_PEM"},
     )
-    state_in = State(leader=True, relations={peer})
 
-    state_out = ctx.run(ctx.on.leader_elected(), state_in)
+    state_in = State(leader=False, relations={peer_relation}, secrets=[secret])
 
-    databag = _app_databag(state_out, peer)
-    remote_unit_name = f"{ctx.app_name}/2"
-    assert databag["granted_unit"] == remote_unit_name
-
-
-def test_no_unit_is_granted_if_there_are_no_requests():
-    ctx = Context(CharmRollingOpsCharmV1)
-    peer = PeerRelation(
-        endpoint="restart",
-        peers_data={1: {"state": LockIntent.IDLE}, 2: {"state": LockIntent.IDLE}},
-    )
-    state_in = State(leader=True, relations={peer})
-
-    state_out = ctx.run(ctx.on.leader_elected(), state_in)
-
-    databag = _app_databag(state_out, peer)
-    assert databag.get("granted_unit", "") == ""
-    assert databag.get("granted_at", "") == ""
+    ctx.run(ctx.on.relation_changed(peer_relation, remote_unit=1), state_in)
+    certificates_manager_patches["persist"].assert_called_once_with("CERT_PEM", "KEY_PEM")

@@ -19,3 +19,7 @@ maintainers:
 peers:
     restart:
         interface: rolling_op
+
+requires:
+  etcd:
+    interface: etcd_client
