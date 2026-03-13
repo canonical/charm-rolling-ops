@@ -309,7 +309,7 @@ class Operation:
             )
 
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-            logger.error("Failed to deserialize Operation from %r: %s", data, e)
+            logger.error("Failed to deserialize Operation from %s: %s", data, e)
             raise RollingOpsDecodingError(f"Failed to deserialize data to create an Operation {e}")
 
     def _kwargs_to_json(self) -> str:
@@ -389,12 +389,16 @@ class OperationQueue:
         try:
             items = json.loads(data)
         except json.JSONDecodeError as e:
+            logger.error(
+                "Failed to deserialize data to create an OperationQueue from %s: %s", data, e
+            )
             raise RollingOpsDecodingError(
-                "Failed to deserialize data to create an OperationQueue from %r: %s", data, e
+                f"Failed to deserialize data to create an OperationQueue from {e}."
             )
 
         if not isinstance(items, list):
-            raise RollingOpsDecodingError("OperationQueue string must decode to a JSON list")
+            logger.error("OperationQueue string must decode to a JSON list %s:", data)
+            raise RollingOpsDecodingError("OperationQueue string must decode to a JSON list.")
 
         operations = [Operation.from_string(s) for s in items]
         return cls(operations)
@@ -462,12 +466,21 @@ class Lock:
           max_retry: None -> unlimited retries, else explicit integer.
         """
         queue = self._operations
-        queue.enqueue_lock_request(callback_id, kwargs, max_retry)
 
-        if len(queue.operations) == 1:
+        previous_length = len(queue)
+        queue.enqueue_lock_request(callback_id, kwargs, max_retry)
+        if previous_length == len(queue):
+            logger.info(
+                "Operation %s not added to the queue. It already exists in the back of the queue.",
+                callback_id,
+            )
+            return
+
+        if len(queue) == 1:
             self._unit_data.update({"state": LockIntent.REQUEST})
 
         self._unit_data.update({"operations": queue.to_string()})
+        logger.info("Operation %s added to the queue.", callback_id)
 
     def _set_retry(self, intent: LockIntent) -> None:
         """Mark the given retry intent on the head operation.
@@ -832,14 +845,15 @@ class RollingOpsManagerV1(Object):
             lock = Lock(self.model, self.relation_name, self.model.unit)
             lock.request(callback_id, kwargs, max_retry)
 
-            if self.model.unit.is_leader():
-                self._process_locks()
         except (RollingOpsDecodingError, ValueError) as e:
             logger.error("Failed operation: %s", e)
             raise RollingOpsInvalidLockRequestError(f"Failed to create the lock request: {e}")
         except RollingOpsNoRelationError as e:
-            logger.debug("No %s peer relation yet. Delaying rolling op.", self.relation_name)
+            logger.debug("No %s peer relation yet.", self.relation_name)
             raise e
+
+        if self.model.unit.is_leader():
+            self._process_locks()
 
     def _on_run_with_lock(self) -> None:
         """Execute the current head operation if this unit holds the distributed lock.
@@ -980,7 +994,6 @@ def main():
     parser.add_argument("--charm-dir", required=True)
     args = parser.parse_args()
 
-    time.sleep(10)
     dispatch_sub_cmd = (
         f"JUJU_DISPATCH_PATH=hooks/rollingops_lock_granted {args.charm_dir}/dispatch"
     )

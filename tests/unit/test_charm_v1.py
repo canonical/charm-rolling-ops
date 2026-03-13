@@ -24,7 +24,7 @@ from charms.rolling_ops.v1.rollingops import (
     Operation,
     OperationQueue,
     RollingOpsDecodingError,
-    RollingOpsInvalidLockRequest,
+    RollingOpsInvalidLockRequestError,
     _now_timestamp_str,
 )
 from ops.testing import Context, PeerRelation, State
@@ -323,12 +323,12 @@ def test_queue_from_string_empty_string_is_empty_queue():
 
 
 def test_queue_from_string_rejects_non_list_json():
-    with pytest.raises(ValueError, match="JSON list"):
+    with pytest.raises(RollingOpsDecodingError, match="OperationQueue string"):
         OperationQueue.from_string(json.dumps({"not": "a list"}))
 
 
 def test_queue_from_string_rejects_invalid_jason():
-    with pytest.raises(ValueError, match="Failed to deserialize OperationQueue"):
+    with pytest.raises(RollingOpsDecodingError, match="Failed to deserialize data"):
         OperationQueue.from_string("{invalid")
 
 
@@ -391,7 +391,7 @@ def test_lock_request_invalid_inputs(max_retry):
     state_in = State(leader=False, relations={peer})
 
     with ctx(ctx.on.update_status(), state_in) as mgr:
-        with pytest.raises(RollingOpsInvalidLockRequest):
+        with pytest.raises(RollingOpsInvalidLockRequestError):
             mgr.charm.restart_manager.request_async_lock(
                 callback_id="_restart",
                 kwargs={},
@@ -413,7 +413,7 @@ def test_lock_request_invalid_callback_id(callback_id):
     state_in = State(leader=False, relations={peer})
 
     with ctx(ctx.on.update_status(), state_in) as mgr:
-        with pytest.raises(RollingOpsInvalidLockRequest, match="Unknown callback_id"):
+        with pytest.raises(RollingOpsInvalidLockRequestError, match="Unknown callback_id"):
             mgr.charm.restart_manager.request_async_lock(
                 callback_id=callback_id,
                 kwargs={},
@@ -436,7 +436,7 @@ def test_lock_request_invalid_kwargs(kwargs):
 
     with ctx(ctx.on.update_status(), state_in) as mgr:
         with pytest.raises(
-            RollingOpsInvalidLockRequest, match="Failed to create the lock request"
+            RollingOpsInvalidLockRequestError, match="Failed to create the lock request"
         ):
             mgr.charm.restart_manager.request_async_lock(
                 callback_id="_restart",
