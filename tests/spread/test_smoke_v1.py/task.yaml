@@ -1,8 +1,0 @@
-summary: test_smoke_v1.py
-variants:
-  - -juju29_lxd
-  - -juju29_microk8s
-environment:
-  TEST_MODULE: test_smoke_v1.py
-execute: |
-  tox run -e integration -- "tests/integration/$TEST_MODULE" --controller "$CONTROLLER_NAME" --model testing

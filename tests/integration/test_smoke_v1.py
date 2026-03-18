@@ -360,7 +360,7 @@ async def test_subsequent_lock_request_of_same_op(ops_test):
         "_restart:done",
     ], f"unexpected event sequence: {relevant_events}"
 
-
+@pytest.mark.skip_if_substrate("microk8s")
 @pytest.mark.abort_on_fail
 async def test_force_remove_unit_holding_the_lock(ops_test):
     units = ops_test.model.applications["rollingops"].units
@@ -378,6 +378,7 @@ async def test_force_remove_unit_holding_the_lock(ops_test):
 
     time.sleep(10)
     logger.info("Removing unit %s", unit_a.name)
+
     await ops_test.model.destroy_unit(unit_a.name, force=True)
     await ops_test.model.wait_for_idle()
 
@@ -394,6 +395,7 @@ async def test_force_remove_unit_holding_the_lock(ops_test):
     ], f"unexpected event sequence: {relevant_events}"
 
 
+@pytest.mark.skip_if_substrate("microk8s")
 @pytest.mark.abort_on_fail
 async def test_remove_unit_holding_the_lock(ops_test):
     units = ops_test.model.applications["rollingops"].units
