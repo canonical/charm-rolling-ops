@@ -29,14 +29,14 @@ Each unit maintains a FIFO queue of operations it wishes to execute.
 
 Keys:
 - `operations`: JSON-encoded list of queued `Operation` objects
-- `state`: `"idle"` | `"request"` | `"retry"`
+- `state`: `"idle"` | `"request"` | `"retry-release"` | `"retry-hold"`
 - `executed_at`: UTC timestamp string indicating when the current operation last ran
 
 Each `Operation` contains:
 - `callback_id`: identifier of the callback to execute
 - `kwargs`: JSON-serializable arguments for the callback
 - `requested_at`: UTC timestamp when the operation was enqueued
-- `max_retry`: maximum retry count (`< 0` means unlimited)
+- `max_retry (optional)`: maximum retry count. `None` means unlimited
 - `attempt`: current attempt number
 
 ### Application databag
@@ -59,7 +59,7 @@ Keys:
 
 - If a callback returns `OperationResult.RETRY_RELEASE` the unit will release the
 lock and retry the operation later.
-- If a callback return `OperationResult.RETRY_HOLD` the unit will keep the
+- If a callback returns `OperationResult.RETRY_HOLD` the unit will keep the
 lock and retry immediately.
 - Retry state (`attempt`) is tracked per operation.
 - When `max_retry` is exceeded, the failing operation is dropped and the unit
@@ -86,21 +86,21 @@ peers:
     interface: rolling_op
 ```
 
-Import this library into src/charm.py, and initialize a RollingOpsManager in the Charm's
+Import this library into src/charm.py, and initialize a RollingOpsManagerV1 in the Charm's
 `__init__`. The Charm should also define a callback routine, which will be executed when
 a unit holds the distributed lock:
 
 src/charm.py
 ```python
-from charms.rolling_ops.v1.rollingops import RollingOpsManagerv1, OperationResult
+from charms.rolling_ops.v1.rollingops import RollingOpsManagerV1, OperationResult
 
 class SomeCharm(CharmBase):
     def __init__(self, *args):
         super().__init__(*args)
 
-        self.rolling_ops = RollingOpsManagerv1(
+        self.rolling_ops = RollingOpsManagerV1(
             charm=self,
-            relation="restart",
+            relation_name="restart",
             callback_targets={
                 "restart": self._restart,
                 "failed_restart": self._failed_restart,
@@ -117,8 +117,7 @@ class SomeCharm(CharmBase):
         return OperationResult.RETRY_RELEASE
 
     def _defer_restart(self) -> OperationResult:
-        if not self.ready():
-            event.defer()
+        if not self.some_condition():
             return OperationResult.RETRY_HOLD
         # do restart logic
         return OperationResult.RELEASE
@@ -146,7 +145,7 @@ Do not include sensitive information in the kwargs of the callback.
 These values will be stored in the databag.
 
 Make sure that callback_targets is not dynamic and that the mapping
-contain the expected values at the moment of the callback execution.
+contains the expected values at the moment of the callback execution.
 """
 
 import argparse
@@ -239,7 +238,7 @@ class Operation:
         if not isinstance(self.requested_at, datetime):
             raise ValueError("requested_at must be a datetime")
 
-        if self.max_retry:
+        if self.max_retry is not None:
             if not isinstance(self.max_retry, int):
                 raise ValueError("max_retry must be an int")
             if self.max_retry < 0:
@@ -434,10 +433,10 @@ class Lock:
     """
 
     def __init__(self, model: Model, relation_name: str, unit: Unit):
-        if not model.relations[relation_name]:
+        if not model.get_relation(relation_name):
             # TODO: defer caller in this case (probably just fired too soon).
             raise RollingOpsNoRelationError()
-        self.relation = model.relations[relation_name][0]
+        self.relation = model.get_relation(relation_name)
         self.unit = unit
         self.app = model.app
 
@@ -457,7 +456,9 @@ class Lock:
     def _state(self) -> str:
         return self._unit_data.get("state", "")
 
-    def request(self, callback_id: str, kwargs: dict, max_retry: int | None = None) -> None:
+    def request(
+        self, callback_id: str, kwargs: dict[str, Any], max_retry: int | None = None
+    ) -> None:
         """Enqueue an operation and mark this unit as requesting the lock.
 
         Args:
@@ -564,7 +565,7 @@ class Lock:
         return self._state == LockIntent.RETRY_RELEASE and not self.is_granted()
 
     def is_retry_hold(self) -> bool:
-        """Return True if the unit requested retry and is waiting for lock to be granted."""
+        """Return True if the unit requested retry and wants to keep the lock."""
         return self._state == LockIntent.RETRY_HOLD and not self.is_granted()
 
     def get_current_operation(self) -> Operation | None:
@@ -572,9 +573,8 @@ class Lock:
         return self._operations.peek()
 
     def _is_max_retry_reached(self) -> bool:
-        """Return True if the head operation exceeded its max_retry (unless max_retry < 0)."""
-        operation = self.get_current_operation()
-        if not operation:
+        """Return True if the head operation exceeded its max_retry (unless max_retry is None)."""
+        if not (operation := self.get_current_operation()):
             return True
         return operation.is_max_retry_reached()
 
@@ -586,19 +586,18 @@ class Lock:
 
     def get_last_completed(self) -> datetime | None:
         """Get the time the unit requested a retry of the head operation."""
-        timestamp_str = self._unit_data.get("executed_at", "")
-        if timestamp_str:
+        if timestamp_str := self._unit_data.get("executed_at", ""):
             return _parse_timestamp(timestamp_str)
         return None
 
-    def get_requested_at(self) -> datetime:
+    def get_requested_at(self) -> datetime | None:
         """Get the time the head operation was requested at."""
-        operation = self.get_current_operation()
-        if not operation:
+        if not (operation := self.get_current_operation()):
             return None
         return operation.requested_at
 
     def _unit_executed_after_grant(self) -> bool:
+        """Returns True if the unit executed its callback after the lock was granted."""
         granted_at = _parse_timestamp(self._app_data.get("granted_at", ""))
         executed_at = _parse_timestamp(self._unit_data.get("executed_at", ""))
 
@@ -648,6 +647,8 @@ def pick_oldest_request(locks: list[Lock]) -> Lock | None:
 
     for lock in locks:
         timestamp = lock.get_requested_at()
+        if not timestamp:
+            continue
 
         if oldest_request is None or timestamp < oldest_request:
             oldest_request = timestamp
@@ -694,9 +695,14 @@ class RollingOpsManagerV1(Object):
 
     @property
     def _relation(self) -> Relation | None:
+        """Returns the peer relation used to manage locks."""
         return self.model.get_relation(self.relation_name)
 
     def _on_rollingops_lock_granted(self, event: RollingOpsLockGrantedEvent) -> None:
+        """Handler of the custom hook rollingops_lock_granted.
+
+        The custom hook is triggered by a background process.
+        """
         if not self._relation:
             return
         logger.info("Received a rolling-ops lock granted event.")
@@ -741,8 +747,7 @@ class RollingOpsManagerV1(Object):
         if not self._relation:
             return
 
-        granted_unit = self._relation.data[self.model.app].get("granted_unit", "")
-        if not granted_unit:
+        if not (granted_unit := self._relation.data[self.model.app].get("granted_unit", "")):
             return
 
         valid_units = self._valid_peer_unit_names()
@@ -754,7 +759,11 @@ class RollingOpsManagerV1(Object):
             self._relation.data[self.model.app].update({"granted_unit": "", "granted_at": ""})
 
     def _process_locks(self, _: EventBase | None = None) -> None:
-        """Process locks."""
+        """Process locks.
+
+        This method is only executed by the leader unit.
+        It effectively releases the lock and triggers scheduling.
+        """
         if not self.model.unit.is_leader():
             return
 
@@ -773,6 +782,20 @@ class RollingOpsManagerV1(Object):
         self._schedule()
 
     def _schedule(self) -> None:
+        """Select and grant the next lock based on priority and queue state.
+
+        This method iterates over all locks associated with the relation and
+        determines which unit should receive the lock next.
+
+        Priority order:
+        1. Units in RETRY_HOLD state are immediately granted the lock.
+        2. Units in REQUEST state are considered next (oldest request first).
+        3. Units in RETRY_RELEASE state are considered last (oldest completed first).
+
+        If no eligible lock is found, no action is taken.
+
+        Once a lock is selected, it is granted via `_grant_lock`.
+        """
         logger.info("Starting scheduling.")
 
         pending_requests = []
@@ -784,7 +807,6 @@ class RollingOpsManagerV1(Object):
                 return
             if lock.is_waiting():
                 pending_requests.append(lock)
-
             elif lock.is_waiting_retry():
                 pending_retries.append(lock)
 
@@ -801,6 +823,15 @@ class RollingOpsManagerV1(Object):
         self._grant_lock(selected)
 
     def _grant_lock(self, selected: Lock) -> None:
+        """Grant the lock to the selected unit.
+
+        If the lock is granted to the leader unit:
+            - If it is a retry, starts the worker to break the loop before next execution.
+            - Otherwise, the callback is run immediately
+
+        Args:
+            selected: The lock instance to grant.
+        """
         selected.grant()
         logger.info("Lock granted to unit=%s.", selected.unit.name)
         if selected.unit == self.model.unit:
@@ -842,6 +873,8 @@ class RollingOpsManagerV1(Object):
             raise RollingOpsInvalidLockRequestError(f"Unknown callback_id: {callback_id}")
 
         try:
+            if kwargs is None:
+                kwargs = {}
             lock = Lock(self.model, self.relation_name, self.model.unit)
             lock.request(callback_id, kwargs, max_retry)
 
@@ -868,13 +901,13 @@ class RollingOpsManagerV1(Object):
         if not lock.is_granted():
             logger.debug("Lock is not granted. Operation will not run.")
             return
-        operation = lock.get_current_operation()
-        if not operation:
+
+        if not (operation := lock.get_current_operation()):
             logger.debug("There is no operation to run.")
             lock.complete()
             return
-        callback = self.callback_targets.get(operation.callback_id, "")
-        if not callback:
+
+        if not (callback := self.callback_targets.get(operation.callback_id, "")):
             logger.warning(
                 "Operation %s target was not found. It cannot be executed.",
                 operation.callback_id,
@@ -886,7 +919,7 @@ class RollingOpsManagerV1(Object):
         try:
             result = callback(**operation.kwargs)
         except Exception as e:
-            logger.error("Operation failed: %s: %s", operation.callback_id, e)
+            logger.exception("Operation failed: %s: %s", operation.callback_id, e)
             result = OperationResult.RETRY_RELEASE
 
         match result:
@@ -916,10 +949,12 @@ class RollingOpsAsyncWorker(Object):
 
     @property
     def _relation(self) -> Relation:
+        """Returns the peer relation."""
         return self._charm.model.get_relation(self._peers_name)
 
     @property
     def _app_data(self) -> dict:
+        """Returns the application databag in the peer relation."""
         return self._relation.data[self.model.app]
 
     def start(self) -> None:
@@ -973,8 +1008,8 @@ class RollingOpsAsyncWorker(Object):
         """Stop the running worker process if it exists."""
         if self._relation is None:
             return
-        pid_str = self._app_data.get("rollingops-worker-pid", "")
-        if not pid_str:
+
+        if not (pid_str := self._app_data.get("rollingops-worker-pid", "")):
             return
 
         pid = int(pid_str)
@@ -983,7 +1018,7 @@ class RollingOpsAsyncWorker(Object):
             logger.info("Stopped RollingOps worker process PID %s", pid)
         except OSError:
             logger.info("Failed to stop RollingOps worker process PID %s", pid)
-            pass
+
         self._app_data.update({"rollingops-worker-pid": ""})
 
 
