@@ -17,7 +17,6 @@
 import json
 import logging
 import shutil
-import time
 from datetime import datetime
 
 import pytest
