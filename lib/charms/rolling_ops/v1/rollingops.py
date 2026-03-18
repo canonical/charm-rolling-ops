@@ -225,7 +225,7 @@ class Operation:
     kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Vallidate the class attributes."""
+        """Validate the class attributes."""
         if not isinstance(self.callback_id, str) or not self.callback_id.strip():
             raise ValueError("callback_id must be a non-empty string")
 
@@ -880,7 +880,7 @@ class RollingOpsManagerV1(Object):
                 operation.callback_id,
             )
             return
-        logger.debug(
+        logger.info(
             "Executing callback_id=%s, attempt=%s", operation.callback_id, operation.attempt
         )
         try:
