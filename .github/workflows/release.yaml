@@ -25,6 +25,8 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Install noctua
+        run: pipx install git+https://github.com/lucabello/noctua
       - name: Release bumped charm library
         env:
           CHARMCRAFT_AUTH: ${{ secrets.CHARMHUB_TOKEN }}
