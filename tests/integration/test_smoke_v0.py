@@ -79,7 +79,11 @@ async def test_smoke(ops_test: OpsTest):
                 action.results.get("Code", None) == "0"
             )
 
-        await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
+        await ops_test.model.block_until(
+            lambda: any(unit.workload_status in ("maintenance", "error") for unit in app.units),
+            timeout=60,
+        )
+
         assert app.status != "error"
 
         await model.wait_for_idle(status="active", timeout=600)
@@ -119,7 +123,9 @@ async def test_smoke_single_unit(ops_test):
         logger.info(f"{action_type} - {app.units[0].name}")
         action: Action = await app.units[0].run_action(action_type, delay=30)
 
-        await model.block_until(lambda: app.status in ("maintenance", "error"), timeout=60)
+        await model.block_until(
+            lambda: app.units[0].workload_status in ("maintenance", "error"), timeout=60
+        )
         assert app.status != "error"
 
         await action.wait()
