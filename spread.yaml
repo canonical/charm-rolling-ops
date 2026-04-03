@@ -43,7 +43,7 @@ backends:
       CONCIERGE_EXTRA_SNAPS: charmcraft
       CONCIERGE_EXTRA_DEBS: pipx
     systems:
-      - ubuntu-24.04:
+      - ubuntu-22.04:
           username: runner
     prepare: |
       systemctl disable --now unattended-upgrades.service
@@ -81,13 +81,16 @@ backends:
 
       echo "runner:$SPREAD_PASSWORD" | sudo chpasswd
 
+      # Remove the preinstalled lxd
+      sudo snap remove --purge --terminate lxd
+
       ADDRESS localhost
     # HACK: spread does not pass environment variables set on runner
     # Manually pass specific environment variables
     environment:
       CI: '$(HOST: echo $CI)'
     systems:
-      - ubuntu-24.04:
+      - ubuntu-22.04:
           username: runner
 
 suites:
