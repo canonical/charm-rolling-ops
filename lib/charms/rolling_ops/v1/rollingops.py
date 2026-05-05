@@ -176,7 +176,7 @@ logger = logging.getLogger(__name__)
 LIBID = "20b7777f58fe421e9a223aefc2b4d3a4"
 
 # Increment this major API version when introducing breaking changes
-LIBAPI = 1
+LIBAPI = 2
 
 # Increment this PATCH version before using `charmcraft publish-lib` or reset
 # to 0 if you are raising the major API version
@@ -674,6 +674,11 @@ class RollingOpsManagerV1(Object):
             relation_name: the peer relation name from metadata.yaml.
             callback_targets: mapping from callback_id -> callable.
         """
+        logger.warning(
+            "The 'rollingops' v1 library is deprecated and no longer maintained. "
+            "Please migrate to the new implementation: "
+            "https://github.com/canonical/charmlibs/tree/main/rollingops"
+        )
         super().__init__(charm, "rolling-ops-manager")
         self._charm = charm
         self.relation_name = relation_name

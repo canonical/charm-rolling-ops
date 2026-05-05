@@ -1,4 +1,4 @@
-# charm-rolling-ops
+# charm-rolling-ops (DEPRECATED)
 
 ## Developing
 

@@ -1,4 +1,35 @@
-# rolling-ops
+# ⚠️ Deprecation Notice
+
+This repository is **deprecated** and is no longer actively maintained.
+
+- No new features will be added
+- This repository may be archived in the future
+
+If you are starting a new project, **do not use this library**.
+
+Please use the new implementation instead:
+
+- Repository: https://github.com/canonical/charmlibs/tree/main/rollingops
+- Documentation: https://documentation.ubuntu.com/charmlibs/reference/charmlibs/rollingops/
+
+### Why?
+
+The Rolling Ops library has been reimplemented to address limitations in the previous version:
+
+- Deferred callbacks could break mutual exclusion, causing operations to run without a lock
+- Multiple lock requests could overwrite each other, silently dropping operations
+- Lack of retry semantics made failure handling unclear and error-prone
+
+The new version introduces:
+
+- Safe handling of deferred callbacks, preserving lock guarantees
+- A per-unit operation queue, ensuring all requests are preserved and executed
+- Explicit retry semantics, allowing controlled and predictable failure handling
+- Support for rolling operations across multiple applications (via etcd)
+
+The new version is **not fully backward compatible**, so migration is be required.
+
+# rolling-ops (DEPRECATED)
 [![Tests](https://github.com/canonical/charm-rolling-ops/actions/workflows/ci.yaml/badge.svg)](https://github.com/canonical/charm-rolling-ops/actions/workflows/ci.yaml)
 
 ## Overview
