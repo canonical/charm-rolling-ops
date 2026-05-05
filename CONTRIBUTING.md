@@ -1,25 +1,3 @@
-# ⚠️ Deprecation Notice
-
-This repository is **deprecated** and no longer actively maintained.
-
-- Repository: https://github.com/canonical/charmlibs/tree/main/rollingops
-
-- Documentation: https://documentation.ubuntu.com/charmlibs/reference/charmlibs/rollingops/
-
-- No new features will be added here.
-- This repository may be archived in the future.
-
-If you are starting a new project, **do not use this library**.
-
-### Why?
-
-The Rolling Ops library has been reimplemented to:
-- Support deferrals and retries
-- Fix callback handling: multiple requests are now queued, not overwritten
-- Enable rolling operations across multiple applications (using etcd)
-
-The new version is **not fully backward compatible**, so migration may be required.
-
 # charm-rolling-ops (DEPRECATED)
 
 ## Developing
