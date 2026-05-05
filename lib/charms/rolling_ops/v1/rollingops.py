@@ -176,11 +176,11 @@ logger = logging.getLogger(__name__)
 LIBID = "20b7777f58fe421e9a223aefc2b4d3a4"
 
 # Increment this major API version when introducing breaking changes
-LIBAPI = 2
+LIBAPI = 1
 
 # Increment this PATCH version before using `charmcraft publish-lib` or reset
 # to 0 if you are raising the major API version
-LIBPATCH = 0
+LIBPATCH = 1
 
 
 def _now_timestamp_str() -> str:
